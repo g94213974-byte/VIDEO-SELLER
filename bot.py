@@ -202,7 +202,8 @@ def handle_callbacks(call):
 
     elif data.startswith("paid_"):
         prod_id = data.split("_")[1]
-        bot.send_message(user_id, "📸 Please send your payment screenshot as a photo.")
+        # Custom Prompt Message Updated
+        bot.send_message(user_id, "📸 Please send your payment screenshot.")
         user_states[user_id] = f"WAITING_SCREENSHOT_{prod_id}"
 
     # --- ADMIN ACTIONS ---
@@ -348,7 +349,21 @@ def handle_all_inputs(message):
                 InlineKeyboardButton("REJECT ❌", callback_data=f"adm_reject_{user_id}"),
                 InlineKeyboardButton("BLOCK 🚫", callback_data=f"adm_block_{user_id}")
             )
-            bot.send_photo(ADMIN_ID, photo_id, caption=f"📸 **New Payment Screenshot**\nUser: @{message.from_user.username}\nID: `{user_id}`", reply_markup=adm_markup, parse_mode="Markdown")
+            
+            # Safe Admin Notification Logic
+            username = message.from_user.username
+            user_tag = f"@{username}" if username else "No Username"
+            user_name = message.from_user.first_name or "User"
+
+            try:
+                bot.send_photo(
+                    ADMIN_ID, 
+                    photo_id, 
+                    caption=f"📸 New Payment Screenshot Received!\n\nUser: {user_tag}\nName: {user_name}\nID: {user_id}", 
+                    reply_markup=adm_markup
+                )
+            except Exception as e:
+                print(f"Error sending to admin: {e}")
 
 # ==========================================
 # 🌐 FLASK KEEP-ALIVE SERVER
