@@ -17,15 +17,15 @@ app = Flask(__name__)
 # --- IN-MEMORY DATABASE STATE ---
 DB_STATE = {
     "welcome_msg": "👋 Hello, {name}!\n\nChoose a plan to get started:",
-    "start_video": "",
+    "start_videos": [], # List of video file_ids
     "how_to_use_video": "",
     "payment_photo": "",
     "payment_msg": "💳 **Payment Instructions**\n\nPlease scan the QR and pay, then click 'I have paid'.",
     "reject_msg": "❌ Your payment couldn't be verified. Please try again.",
     "broadcast_msg": "",
-    "broadcast_hours": 24,
+    "broadcast_minutes": 3, # Interval in minutes
     "layout_style": "vertical", # 'vertical' (=) or 'horizontal' (--)
-    "products": [], # [{"id": "1", "name": "Basic Plan", "desc": "Details", "photo": "", "link": "https://..."}]
+    "products": [], # [{"id": "1", "name": "Plan 1", "desc": "Details", "videos": ["vid_id_1", "vid_id_2"], "link": "https://..."}]
     "blocked_users": [],
     "users": []
 }
@@ -67,14 +67,26 @@ def send_auto_broadcast():
     if not msg_text:
         return
     for u_id in DB_STATE.get("users", []):
+        if u_id in DB_STATE.get("blocked_users", []):
+            continue
         try:
             bot.send_message(u_id, msg_text)
         except Exception:
             pass
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(send_auto_broadcast, 'interval', hours=DB_STATE.get("broadcast_hours", 24))
+
+def reset_broadcast_job():
+    try:
+        scheduler.remove_job('bc_job')
+    except Exception:
+        pass
+    mins = int(DB_STATE.get("broadcast_minutes", 3))
+    if mins < 1: mins = 1
+    scheduler.add_job(send_auto_broadcast, 'interval', minutes=mins, id='bc_job')
+
 scheduler.start()
+reset_broadcast_job()
 
 # ==========================================
 # 🚀 USER SIDE LOGIC
@@ -88,12 +100,13 @@ def start_command(message):
         DB_STATE["users"].append(user_id)
         save_db()
 
-    # Welcome Video
-    if DB_STATE.get("start_video"):
+    # Send All Start Videos
+    start_vids = DB_STATE.get("start_videos", [])
+    for vid in start_vids:
         try:
-            bot.send_video(user_id, DB_STATE["start_video"])
-        except Exception:
-            pass
+            bot.send_video(user_id, vid)
+        except Exception as e:
+            print(f"Error sending start video: {e}")
 
     welcome_text = DB_STATE["welcome_msg"].format(name=name)
     markup = InlineKeyboardMarkup()
@@ -133,10 +146,9 @@ def admin_menu(message):
 
 def send_admin_panel(chat_id):
     markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("🎬 Manage Start Videos", callback_data="adm_start_vids_menu"))
+    markup.row(InlineKeyboardButton("📦 Manage Product Buttons & Videos", callback_data="adm_prod_menu"))
     markup.row(InlineKeyboardButton("✏️ Edit Welcome Text", callback_data="adm_edit_welcome"))
-    markup.row(InlineKeyboardButton("🎬 Set Start Video", callback_data="adm_set_start_vid"))
-    markup.row(InlineKeyboardButton("➕ Add Product Button", callback_data="adm_add_prod"))
-    markup.row(InlineKeyboardButton("🗑️ Delete Product Button", callback_data="adm_del_prod_list"))
     
     current_layout = DB_STATE.get("layout_style", "vertical")
     layout_icon = "↕️ Vertical (=)" if current_layout == "vertical" else "↔️ Horizontal (--)"
@@ -144,9 +156,15 @@ def send_admin_panel(chat_id):
     
     markup.row(InlineKeyboardButton("🎥 Set How To Use Video", callback_data="adm_set_how_vid"))
     markup.row(InlineKeyboardButton("💳 Set Payment QR / Photo", callback_data="adm_set_pay_photo"))
-    markup.row(InlineKeyboardButton("📢 Set Auto Broadcast Text", callback_data="adm_set_bc_text"))
+    
+    bc_mins = DB_STATE.get("broadcast_minutes", 3)
+    markup.row(InlineKeyboardButton("📢 Set Broadcast Text", callback_data="adm_set_bc_text"))
+    markup.row(InlineKeyboardButton(f"⏱️ Set Broadcast Time ({bc_mins} min)", callback_data="adm_set_bc_time"))
+    
+    blocked_count = len(DB_STATE.get("blocked_users", []))
+    markup.row(InlineKeyboardButton(f"🚫 Unblock Users ({blocked_count})", callback_data="adm_unblock_menu"))
 
-    bot.send_message(chat_id, "⚙️ **Admin Customization Control Panel**\n\nChoose an option below:", reply_markup=markup, parse_mode="Markdown")
+    bot.send_message(chat_id, "⚙️ **Admin Customization Panel**\nChoose an option to configure:", reply_markup=markup, parse_mode="Markdown")
 
 # ==========================================
 # 🔄 CALLBACK QUERY HANDLER
@@ -176,15 +194,19 @@ def handle_callbacks(call):
         prod_id = data.split("_")[1]
         prod = next((p for p in DB_STATE["products"] if p["id"] == prod_id), None)
         if prod:
+            # Send all videos assigned to this button
+            p_videos = prod.get("videos", [])
+            for p_vid in p_videos:
+                try:
+                    bot.send_video(user_id, p_vid)
+                except Exception as e:
+                    print(f"Error sending product video: {e}")
+
             caption = f"📌 **{prod['name']}**\n\n{prod.get('desc', '')}"
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("Buy Now 🛒", callback_data=f"buynow_{prod_id}"))
             markup.row(InlineKeyboardButton("Back 🔙", callback_data="back_home"))
-
-            if prod.get("photo"):
-                bot.send_photo(user_id, prod["photo"], caption=caption, reply_markup=markup, parse_mode="Markdown")
-            else:
-                bot.send_message(user_id, caption, reply_markup=markup, parse_mode="Markdown")
+            bot.send_message(user_id, caption, reply_markup=markup, parse_mode="Markdown")
 
     elif data.startswith("buynow_"):
         prod_id = data.split("_")[1]
@@ -202,42 +224,111 @@ def handle_callbacks(call):
 
     elif data.startswith("paid_"):
         prod_id = data.split("_")[1]
-        # Custom Prompt Message Updated
         bot.send_message(user_id, "📸 Please send your payment screenshot.")
         user_states[user_id] = f"WAITING_SCREENSHOT_{prod_id}"
 
     # --- ADMIN ACTIONS ---
     if user_id == ADMIN_ID:
-        if data == "adm_edit_welcome":
-            bot.send_message(ADMIN_ID, "Send new Welcome Text.\nUse `{name}` for user name variable:")
-            user_states[ADMIN_ID] = "ADM_SET_WELCOME"
+        if data == "adm_start_vids_menu":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("➕ Add Start Video", callback_data="adm_add_start_vid"))
+            markup.row(InlineKeyboardButton("🗑️ Delete A Start Video", callback_data="adm_del_start_vid_list"))
+            markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_back_panel"))
+            v_count = len(DB_STATE.get("start_videos", []))
+            bot.send_message(ADMIN_ID, f"🎬 **Start Videos Management**\nTotal Videos: {v_count}", reply_markup=markup)
 
-        elif data == "adm_set_start_vid":
-            bot.send_message(ADMIN_ID, "Please send/upload the Start Video now:")
-            user_states[ADMIN_ID] = "ADM_SET_START_VID"
+        elif data == "adm_add_start_vid":
+            bot.send_message(ADMIN_ID, "Please upload/send a Video to add to Start Videos:")
+            user_states[ADMIN_ID] = "ADM_ADD_START_VID"
 
-        elif data == "adm_toggle_layout":
-            curr = DB_STATE.get("layout_style", "vertical")
-            DB_STATE["layout_style"] = "horizontal" if curr == "vertical" else "vertical"
-            save_db()
-            bot.answer_callback_query(call.id, "Layout Updated!")
+        elif data == "adm_del_start_vid_list":
+            markup = InlineKeyboardMarkup()
+            vids = DB_STATE.get("start_videos", [])
+            for idx, v_id in enumerate(vids):
+                markup.row(InlineKeyboardButton(f"❌ Delete Video {idx+1}", callback_data=f"adm_del_svid_{idx}"))
+            markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_start_vids_menu"))
+            bot.send_message(ADMIN_ID, "Select a video to delete:", reply_markup=markup)
+
+        elif data.startswith("adm_del_svid_"):
+            idx = int(data.replace("adm_del_svid_", ""))
+            if 0 <= idx < len(DB_STATE.get("start_videos", [])):
+                DB_STATE["start_videos"].pop(idx)
+                save_db()
+                bot.answer_callback_query(call.id, "Video Deleted!")
             send_admin_panel(ADMIN_ID)
+
+        elif data == "adm_prod_menu":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("➕ Add New Button", callback_data="adm_add_prod"))
+            markup.row(InlineKeyboardButton("🎥 Add Video to a Button", callback_data="adm_prod_add_vid_list"))
+            markup.row(InlineKeyboardButton("🗑️ Delete Video from Button", callback_data="adm_prod_del_vid_list"))
+            markup.row(InlineKeyboardButton("🗑️ Delete Button", callback_data="adm_del_prod_list"))
+            markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_back_panel"))
+            bot.send_message(ADMIN_ID, "📦 **Product Button Management**", reply_markup=markup)
 
         elif data == "adm_add_prod":
             bot.send_message(ADMIN_ID, "Enter New Button Name (e.g., Plan A):")
             user_states[ADMIN_ID] = "ADM_ADD_PROD_NAME"
 
+        elif data == "adm_prod_add_vid_list":
+            markup = InlineKeyboardMarkup()
+            for p in DB_STATE.get("products", []):
+                markup.row(InlineKeyboardButton(f"🎥 Add Video to: {p['name']}", callback_data=f"adm_p_addvid_{p['id']}"))
+            bot.send_message(ADMIN_ID, "Select a button to add video to:", reply_markup=markup)
+
+        elif data.startswith("adm_p_addvid_"):
+            p_id = data.replace("adm_p_addvid_", "")
+            bot.send_message(ADMIN_ID, "Please send/upload a Video for this button:")
+            user_states[ADMIN_ID] = f"ADM_UPL_PROD_VID_{p_id}"
+
+        elif data == "adm_prod_del_vid_list":
+            markup = InlineKeyboardMarkup()
+            for p in DB_STATE.get("products", []):
+                v_count = len(p.get("videos", []))
+                markup.row(InlineKeyboardButton(f"🗑️ Delete Video ({v_count} vids): {p['name']}", callback_data=f"adm_p_delvid_sel_{p['id']}"))
+            bot.send_message(ADMIN_ID, "Select a button to manage/delete its videos:", reply_markup=markup)
+
+        elif data.startswith("adm_p_delvid_sel_"):
+            p_id = data.replace("adm_p_delvid_sel_", "")
+            prod = next((p for p in DB_STATE["products"] if p["id"] == p_id), None)
+            if prod:
+                markup = InlineKeyboardMarkup()
+                for idx, v_id in enumerate(prod.get("videos", [])):
+                    markup.row(InlineKeyboardButton(f"❌ Delete Video {idx+1}", callback_data=f"adm_p_delvid_exec_{p_id}_{idx}"))
+                bot.send_message(ADMIN_ID, f"Select video to delete for button '{prod['name']}':", reply_markup=markup)
+
+        elif data.startswith("adm_p_delvid_exec_"):
+            _, _, _, p_id, idx_str = data.split("_")
+            idx = int(idx_str)
+            prod = next((p for p in DB_STATE["products"] if p["id"] == p_id), None)
+            if prod and "videos" in prod and 0 <= idx < len(prod["videos"]):
+                prod["videos"].pop(idx)
+                save_db()
+                bot.answer_callback_query(call.id, "Product Video Deleted!")
+            send_admin_panel(ADMIN_ID)
+
         elif data == "adm_del_prod_list":
             markup = InlineKeyboardMarkup()
             for p in DB_STATE.get("products", []):
-                markup.row(InlineKeyboardButton(f"❌ Delete: {p['name']}", callback_data=f"adm_del_p_{p['id']}"))
-            bot.send_message(ADMIN_ID, "Click a button to delete it:", reply_markup=markup)
+                markup.row(InlineKeyboardButton(f"❌ Delete Button: {p['name']}", callback_data=f"adm_del_p_{p['id']}"))
+            bot.send_message(ADMIN_ID, "Click a button to delete it completely:", reply_markup=markup)
 
         elif data.startswith("adm_del_p_"):
             p_id = data.replace("adm_del_p_", "")
             DB_STATE["products"] = [p for p in DB_STATE["products"] if p["id"] != p_id]
             save_db()
             bot.answer_callback_query(call.id, "Button Deleted!")
+            send_admin_panel(ADMIN_ID)
+
+        elif data == "adm_edit_welcome":
+            bot.send_message(ADMIN_ID, "Send new Welcome Text.\nUse `{name}` for user name variable:")
+            user_states[ADMIN_ID] = "ADM_SET_WELCOME"
+
+        elif data == "adm_toggle_layout":
+            curr = DB_STATE.get("layout_style", "vertical")
+            DB_STATE["layout_style"] = "horizontal" if curr == "vertical" else "vertical"
+            save_db()
+            bot.answer_callback_query(call.id, "Layout Updated!")
             send_admin_panel(ADMIN_ID)
 
         elif data == "adm_set_how_vid":
@@ -251,6 +342,29 @@ def handle_callbacks(call):
         elif data == "adm_set_bc_text":
             bot.send_message(ADMIN_ID, "Enter text for Auto-Broadcast message:")
             user_states[ADMIN_ID] = "ADM_SET_BC_TEXT"
+
+        elif data == "adm_set_bc_time":
+            bot.send_message(ADMIN_ID, "Enter Auto-Broadcast interval in MINUTES (e.g. 3, 5, 10):")
+            user_states[ADMIN_ID] = "ADM_SET_BC_TIME"
+
+        elif data == "adm_unblock_menu":
+            markup = InlineKeyboardMarkup()
+            blocked_users = DB_STATE.get("blocked_users", [])
+            for b_id in blocked_users:
+                markup.row(InlineKeyboardButton(f"🔓 Unblock ID: {b_id}", callback_data=f"adm_unblock_exec_{b_id}"))
+            markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_back_panel"))
+            bot.send_message(ADMIN_ID, "Select a user to unblock:", reply_markup=markup)
+
+        elif data.startswith("adm_unblock_exec_"):
+            b_id = int(data.replace("adm_unblock_exec_", ""))
+            if b_id in DB_STATE.get("blocked_users", []):
+                DB_STATE["blocked_users"].remove(b_id)
+                save_db()
+                bot.answer_callback_query(call.id, "User Unblocked!")
+            send_admin_panel(ADMIN_ID)
+
+        elif data == "adm_back_panel":
+            send_admin_panel(ADMIN_ID)
 
         elif data.startswith("adm_confirm_"):
             _, _, prod_id, target_user = data.split("_")
@@ -277,24 +391,39 @@ def handle_callbacks(call):
 @bot.message_handler(content_types=['photo', 'video', 'text'])
 def handle_all_inputs(message):
     user_id = message.chat.id
-    if user_id in DB_STATE["blocked_users"]:
+
+    # 🚫 Check if User is Blocked (If blocked, completely ignore input)
+    if user_id in DB_STATE.get("blocked_users", []):
         return
 
     state = user_states.get(user_id, "")
 
     # Admin Inputs
     if user_id == ADMIN_ID:
-        if state == "ADM_SET_WELCOME" and message.text:
+        if state == "ADM_ADD_START_VID" and message.content_type == 'video':
+            if "start_videos" not in DB_STATE:
+                DB_STATE["start_videos"] = []
+            DB_STATE["start_videos"].append(message.video.file_id)
+            save_db()
+            user_states.pop(user_id, None)
+            bot.send_message(ADMIN_ID, "✅ New Start Video added!")
+
+        elif state.startswith("ADM_UPL_PROD_VID_") and message.content_type == 'video':
+            p_id = state.replace("ADM_UPL_PROD_VID_", "")
+            prod = next((p for p in DB_STATE["products"] if p["id"] == p_id), None)
+            if prod:
+                if "videos" not in prod:
+                    prod["videos"] = []
+                prod["videos"].append(message.video.file_id)
+                save_db()
+                bot.send_message(ADMIN_ID, f"✅ Video added to button '{prod['name']}'!")
+            user_states.pop(user_id, None)
+
+        elif state == "ADM_SET_WELCOME" and message.text:
             DB_STATE["welcome_msg"] = message.text
             save_db()
             user_states.pop(user_id, None)
             bot.send_message(ADMIN_ID, "✅ Welcome Text updated!")
-
-        elif state == "ADM_SET_START_VID" and message.content_type == 'video':
-            DB_STATE["start_video"] = message.video.file_id
-            save_db()
-            user_states.pop(user_id, None)
-            bot.send_message(ADMIN_ID, "✅ Start Video saved!")
 
         elif state == "ADM_SET_HOW_VID" and message.content_type == 'video':
             DB_STATE["how_to_use_video"] = message.video.file_id
@@ -314,9 +443,20 @@ def handle_all_inputs(message):
             user_states.pop(user_id, None)
             bot.send_message(ADMIN_ID, "✅ Auto Broadcast message saved!")
 
+        elif state == "ADM_SET_BC_TIME" and message.text:
+            try:
+                mins = int(message.text)
+                DB_STATE["broadcast_minutes"] = mins
+                save_db()
+                reset_broadcast_job()
+                bot.send_message(ADMIN_ID, f"✅ Auto-Broadcast interval updated to {mins} Minutes!")
+            except ValueError:
+                bot.send_message(ADMIN_ID, "❌ Invalid number! Please enter a valid integer for minutes.")
+            user_states.pop(user_id, None)
+
         elif state == "ADM_ADD_PROD_NAME" and message.text:
             new_id = str(len(DB_STATE["products"]) + 1)
-            DB_STATE["products"].append({"id": new_id, "name": message.text, "desc": "Default description", "link": "https://example.com"})
+            DB_STATE["products"].append({"id": new_id, "name": message.text, "desc": "Product details", "videos": [], "link": "https://example.com"})
             save_db()
             bot.send_message(ADMIN_ID, "Enter Product Link to deliver after payment:")
             user_states[user_id] = f"ADM_ADD_PROD_LINK_{new_id}"
@@ -350,7 +490,6 @@ def handle_all_inputs(message):
                 InlineKeyboardButton("BLOCK 🚫", callback_data=f"adm_block_{user_id}")
             )
             
-            # Safe Admin Notification Logic
             username = message.from_user.username
             user_tag = f"@{username}" if username else "No Username"
             user_name = message.from_user.first_name or "User"
