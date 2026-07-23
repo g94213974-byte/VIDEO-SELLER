@@ -3,7 +3,7 @@ import json
 import threading
 from flask import Flask
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # --- ENVIRONMENT VARIABLES ---
@@ -25,7 +25,7 @@ DB_STATE = {
     "broadcast_msg": "",
     "broadcast_minutes": 3, # Interval in minutes
     "layout_style": "vertical", # 'vertical' (=) or 'horizontal' (--)
-    "products": [], # [{"id": "1", "name": "Plan 1", "desc": "Details", "videos": ["vid_id_1", "vid_id_2"], "link": "https://..."}]
+    "products": [], # [{"id": "1", "name": "Plan 1", "desc": "Details", "videos": ["vid1"], "link": "https://..."}]
     "blocked_users": [],
     "users": []
 }
@@ -58,6 +58,30 @@ def save_db():
 
 load_db()
 user_states = {}
+
+# --- HELPER FUNCTION: SEND VIDEOS AS ALBUM GRID ---
+def send_videos_as_album(chat_id, video_list):
+    if not video_list:
+        return
+    if len(video_list) == 1:
+        try:
+            bot.send_video(chat_id, video_list[0])
+        except Exception as e:
+            print(f"Error sending video: {e}")
+    else:
+        # Send videos grouped together (Max 10 per album batch)
+        for i in range(0, len(video_list), 10):
+            chunk = video_list[i:i+10]
+            media_group = [InputMediaVideo(v) for v in chunk]
+            try:
+                bot.send_media_group(chat_id, media_group)
+            except Exception as e:
+                print(f"Error sending media group, sending individually: {e}")
+                for v in chunk:
+                    try:
+                        bot.send_video(chat_id, v)
+                    except Exception:
+                        pass
 
 # ==========================================
 # 🔄 AUTO BROADCAST SYSTEM
@@ -100,13 +124,10 @@ def start_command(message):
         DB_STATE["users"].append(user_id)
         save_db()
 
-    # Send All Start Videos
+    # Send All Start Videos as Album
     start_vids = DB_STATE.get("start_videos", [])
-    for vid in start_vids:
-        try:
-            bot.send_video(user_id, vid)
-        except Exception as e:
-            print(f"Error sending start video: {e}")
+    if start_vids:
+        send_videos_as_album(user_id, start_vids)
 
     welcome_text = DB_STATE["welcome_msg"].format(name=name)
     markup = InlineKeyboardMarkup()
@@ -194,13 +215,10 @@ def handle_callbacks(call):
         prod_id = data.split("_")[1]
         prod = next((p for p in DB_STATE["products"] if p["id"] == prod_id), None)
         if prod:
-            # Send all videos assigned to this button
+            # Send all videos assigned to this button as an ALBUM GRID
             p_videos = prod.get("videos", [])
-            for p_vid in p_videos:
-                try:
-                    bot.send_video(user_id, p_vid)
-                except Exception as e:
-                    print(f"Error sending product video: {e}")
+            if p_videos:
+                send_videos_as_album(user_id, p_videos)
 
             caption = f"📌 **{prod['name']}**\n\n{prod.get('desc', '')}"
             markup = InlineKeyboardMarkup()
@@ -229,10 +247,11 @@ def handle_callbacks(call):
 
     # --- ADMIN ACTIONS ---
     if user_id == ADMIN_ID:
+        # Start Videos Management
         if data == "adm_start_vids_menu":
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("➕ Add Start Video", callback_data="adm_add_start_vid"))
-            markup.row(InlineKeyboardButton("🗑️ Delete A Start Video", callback_data="adm_del_start_vid_list"))
+            markup.row(InlineKeyboardButton("🗑️ Manage / Delete Start Videos", callback_data="adm_del_start_vid_list"))
             markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_back_panel"))
             v_count = len(DB_STATE.get("start_videos", []))
             bot.send_message(ADMIN_ID, f"🎬 **Start Videos Management**\nTotal Videos: {v_count}", reply_markup=markup)
@@ -245,24 +264,42 @@ def handle_callbacks(call):
             markup = InlineKeyboardMarkup()
             vids = DB_STATE.get("start_videos", [])
             for idx, v_id in enumerate(vids):
-                markup.row(InlineKeyboardButton(f"❌ Delete Video {idx+1}", callback_data=f"adm_del_svid_{idx}"))
+                markup.row(
+                    InlineKeyboardButton(f"👀 See Vid {idx+1}", callback_data=f"sv_see_{idx}"),
+                    InlineKeyboardButton(f"❌ Delete Vid {idx+1}", callback_data=f"sv_del_{idx}")
+                )
+            if vids:
+                markup.row(InlineKeyboardButton("💥 Delete All Start Videos", callback_data="sv_del_all"))
             markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_start_vids_menu"))
-            bot.send_message(ADMIN_ID, "Select a video to delete:", reply_markup=markup)
+            bot.send_message(ADMIN_ID, "Select an action for Start Videos:", reply_markup=markup)
 
-        elif data.startswith("adm_del_svid_"):
-            idx = int(data.replace("adm_del_svid_", ""))
-            if 0 <= idx < len(DB_STATE.get("start_videos", [])):
-                DB_STATE["start_videos"].pop(idx)
+        elif data.startswith("sv_see_"):
+            idx = int(data.replace("sv_see_", ""))
+            vids = DB_STATE.get("start_videos", [])
+            if 0 <= idx < len(vids):
+                bot.send_video(ADMIN_ID, vids[idx], caption=f"🎥 Start Video {idx+1}")
+
+        elif data.startswith("sv_del_"):
+            if data == "sv_del_all":
+                DB_STATE["start_videos"] = []
                 save_db()
-                bot.answer_callback_query(call.id, "Video Deleted!")
+                bot.answer_callback_query(call.id, "All Start Videos Deleted!")
+            else:
+                idx = int(data.replace("sv_del_", ""))
+                vids = DB_STATE.get("start_videos", [])
+                if 0 <= idx < len(vids):
+                    DB_STATE["start_videos"].pop(idx)
+                    save_db()
+                    bot.answer_callback_query(call.id, "Video Deleted!")
             send_admin_panel(ADMIN_ID)
 
+        # Product Buttons & Videos Management
         elif data == "adm_prod_menu":
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("➕ Add New Button", callback_data="adm_add_prod"))
             markup.row(InlineKeyboardButton("🎥 Add Video to a Button", callback_data="adm_prod_add_vid_list"))
-            markup.row(InlineKeyboardButton("🗑️ Delete Video from Button", callback_data="adm_prod_del_vid_list"))
-            markup.row(InlineKeyboardButton("🗑️ Delete Button", callback_data="adm_del_prod_list"))
+            markup.row(InlineKeyboardButton("🗑️ Manage / Delete Videos of Button", callback_data="adm_prod_del_vid_list"))
+            markup.row(InlineKeyboardButton("❌ Delete Button Completely", callback_data="adm_del_prod_list"))
             markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_back_panel"))
             bot.send_message(ADMIN_ID, "📦 **Product Button Management**", reply_markup=markup)
 
@@ -285,26 +322,49 @@ def handle_callbacks(call):
             markup = InlineKeyboardMarkup()
             for p in DB_STATE.get("products", []):
                 v_count = len(p.get("videos", []))
-                markup.row(InlineKeyboardButton(f"🗑️ Delete Video ({v_count} vids): {p['name']}", callback_data=f"adm_p_delvid_sel_{p['id']}"))
-            bot.send_message(ADMIN_ID, "Select a button to manage/delete its videos:", reply_markup=markup)
+                markup.row(InlineKeyboardButton(f"⚙️ Manage Videos ({v_count}): {p['name']}", callback_data=f"adm_p_mngv_{p['id']}"))
+            bot.send_message(ADMIN_ID, "Select a button to view/delete its videos:", reply_markup=markup)
 
-        elif data.startswith("adm_p_delvid_sel_"):
-            p_id = data.replace("adm_p_delvid_sel_", "")
+        elif data.startswith("adm_p_mngv_"):
+            p_id = data.replace("adm_p_mngv_", "")
             prod = next((p for p in DB_STATE["products"] if p["id"] == p_id), None)
             if prod:
                 markup = InlineKeyboardMarkup()
-                for idx, v_id in enumerate(prod.get("videos", [])):
-                    markup.row(InlineKeyboardButton(f"❌ Delete Video {idx+1}", callback_data=f"adm_p_delvid_exec_{p_id}_{idx}"))
-                bot.send_message(ADMIN_ID, f"Select video to delete for button '{prod['name']}':", reply_markup=markup)
+                vids = prod.get("videos", [])
+                for idx, v_id in enumerate(vids):
+                    markup.row(
+                        InlineKeyboardButton(f"👀 See Vid {idx+1}", callback_data=f"pv_see_{p_id}_{idx}"),
+                        InlineKeyboardButton(f"❌ Delete Vid {idx+1}", callback_data=f"pv_del_{p_id}_{idx}")
+                    )
+                if vids:
+                    markup.row(InlineKeyboardButton("💥 Delete All Videos", callback_data=f"pv_dall_{p_id}"))
+                markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_prod_menu"))
+                bot.send_message(ADMIN_ID, f"🎥 **Manage videos for button '{prod['name']}'**:", reply_markup=markup)
 
-        elif data.startswith("adm_p_delvid_exec_"):
-            _, _, _, p_id, idx_str = data.split("_")
+        elif data.startswith("pv_see_"):
+            _, _, p_id, idx_str = data.split("_")
+            idx = int(idx_str)
+            prod = next((p for p in DB_STATE["products"] if p["id"] == p_id), None)
+            if prod and "videos" in prod and 0 <= idx < len(prod["videos"]):
+                bot.send_video(ADMIN_ID, prod["videos"][idx], caption=f"🎥 Video {idx+1} of '{prod['name']}'")
+
+        elif data.startswith("pv_del_"):
+            _, _, p_id, idx_str = data.split("_")
             idx = int(idx_str)
             prod = next((p for p in DB_STATE["products"] if p["id"] == p_id), None)
             if prod and "videos" in prod and 0 <= idx < len(prod["videos"]):
                 prod["videos"].pop(idx)
                 save_db()
-                bot.answer_callback_query(call.id, "Product Video Deleted!")
+                bot.answer_callback_query(call.id, "Video Deleted!")
+            send_admin_panel(ADMIN_ID)
+
+        elif data.startswith("pv_dall_"):
+            p_id = data.replace("pv_dall_", "")
+            prod = next((p for p in DB_STATE["products"] if p["id"] == p_id), None)
+            if prod:
+                prod["videos"] = []
+                save_db()
+                bot.answer_callback_query(call.id, "All Videos Deleted!")
             send_admin_panel(ADMIN_ID)
 
         elif data == "adm_del_prod_list":
@@ -392,7 +452,6 @@ def handle_callbacks(call):
 def handle_all_inputs(message):
     user_id = message.chat.id
 
-    # 🚫 Check if User is Blocked (If blocked, completely ignore input)
     if user_id in DB_STATE.get("blocked_users", []):
         return
 
