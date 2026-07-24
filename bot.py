@@ -171,7 +171,7 @@ def show_main_admin_menu(chat_id):
     user_states.pop(chat_id, None) 
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton("🎞️ Manage Start Videos", callback_data="adm_start_vids_menu"))
-    markup.row(InlineKeyboardButton("🛍️ Manage Product Buttons & Details", callback_data="adm_prod_menu"))
+    markup.row(InlineKeyboardButton("🛍️ Manage Product Buttons", callback_data="adm_prod_menu"))
     markup.row(InlineKeyboardButton("📝 Edit Welcome Text", callback_data="adm_edit_welcome"))
     
     current_layout = DB_STATE.get("layout_style", "vertical")
@@ -181,7 +181,7 @@ def show_main_admin_menu(chat_id):
     markup.row(InlineKeyboardButton("🎥 Set 'How To Use' Video", callback_data="adm_set_how_vid"))
     markup.row(InlineKeyboardButton("💳 Global Payment Config", callback_data="adm_pay_config_menu"))
     
-    markup.row(InlineKeyboardButton("🚀 Send Custom Broadcast Now", callback_data="adm_send_custom_bc"))
+    markup.row(InlineKeyboardButton("🚀 Send Custom Broadcast", callback_data="adm_send_custom_bc"))
     
     bc_mins = DB_STATE.get("broadcast_minutes", 3)
     bc_status = "🟢 ON" if DB_STATE.get("broadcast_enabled", True) else "🔴 OFF"
@@ -203,12 +203,17 @@ def show_main_admin_menu(chat_id):
 # ==========================================
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
+    # ⚡ FIX 1: This makes buttons respond INSTANTLY instead of loading/spinning ⚡
+    try:
+        bot.answer_callback_query(call.id)
+    except:
+        pass
+
     user_id = call.message.chat.id
     data = call.data
     msg_id = call.message.message_id
 
     if data == "adm_open_panel" and user_id == ADMIN_ID:
-        bot.answer_callback_query(call.id)
         try: bot.delete_message(user_id, msg_id)
         except: pass
         show_main_admin_menu(ADMIN_ID)
@@ -253,7 +258,6 @@ def handle_callbacks(call):
         markup.row(InlineKeyboardButton("I have paid ✅", callback_data=f"paid_{prod_id}"))
         markup.row(InlineKeyboardButton("Cancel ❌", callback_data="back_home"))
 
-        # 🔹 INDIVIDUAL PAYMENT MESSAGE LOGIC 🔹
         if prod and prod.get("pay_msg"):
             pay_msg = prod["pay_msg"]
         else:
@@ -277,7 +281,7 @@ def handle_callbacks(call):
         if data == "adm_start_vids_menu":
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("➕ Add Start Videos", callback_data="adm_add_start_vid"))
-            markup.row(InlineKeyboardButton("⚙️ Manage / Delete Start Videos", callback_data="adm_del_start_vid_list"))
+            markup.row(InlineKeyboardButton("⚙️ Manage / Delete Videos", callback_data="adm_del_start_vid_list"))
             markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
             v_count = len(DB_STATE.get("start_videos", []))
             update_admin_panel(ADMIN_ID, f"🎞️ **Start Videos Management**\n\nTotal Saved Videos: {v_count}", markup)
@@ -290,7 +294,6 @@ def handle_callbacks(call):
             user_states[ADMIN_ID] = "ADM_ADD_START_VID_MULTIPLE"
 
         elif data == "adm_finish_start_vids":
-            bot.answer_callback_query(call.id, "Saved Successfully!")
             show_main_admin_menu(ADMIN_ID)
 
         elif data == "adm_del_start_vid_list":
@@ -313,18 +316,15 @@ def handle_callbacks(call):
                 m = InlineKeyboardMarkup()
                 m.row(InlineKeyboardButton("❌ Close Media", callback_data="del_msg"))
                 bot.send_video(ADMIN_ID, vids[idx], caption=f"🎥 Start Video {idx+1}", reply_markup=m)
-                bot.answer_callback_query(call.id)
 
         elif data.startswith("sv_del_"):
             if data == "sv_del_all":
                 DB_STATE["start_videos"] = []
-                bot.answer_callback_query(call.id, "💥 All Start Videos Deleted!")
             else:
                 idx = int(data.replace("sv_del_", ""))
                 vids = DB_STATE.get("start_videos", [])
                 if 0 <= idx < len(vids):
                     vids.pop(idx)
-                    bot.answer_callback_query(call.id, "🗑️ Video Deleted!")
             save_db()
             call.data = "adm_del_start_vid_list"
             handle_callbacks(call)
@@ -332,11 +332,11 @@ def handle_callbacks(call):
         elif data == "adm_prod_menu":
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("❇️ Add New Button", callback_data="adm_add_prod"))
-            markup.row(InlineKeyboardButton("✏️ Edit Button Name / Details / Link", callback_data="adm_prod_edit_list"))
-            markup.row(InlineKeyboardButton("🔢 Change Button Position / Order", callback_data="adm_prod_pos_list"))
-            markup.row(InlineKeyboardButton("🎦 Add Videos to a Button", callback_data="adm_prod_add_vid_list"))
-            markup.row(InlineKeyboardButton("⚙️ Manage Button Videos", callback_data="adm_prod_del_vid_list"))
-            markup.row(InlineKeyboardButton("🗑️ Delete Entire Button", callback_data="adm_del_prod_list"))
+            markup.row(InlineKeyboardButton("✏️ Edit Details / Link", callback_data="adm_prod_edit_list"))
+            markup.row(InlineKeyboardButton("🔢 Change Position", callback_data="adm_prod_pos_list"))
+            markup.row(InlineKeyboardButton("🎦 Add Videos", callback_data="adm_prod_add_vid_list"))
+            markup.row(InlineKeyboardButton("⚙️ Manage Videos", callback_data="adm_prod_del_vid_list"))
+            markup.row(InlineKeyboardButton("🗑️ Delete Button", callback_data="adm_del_prod_list"))
             markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
             update_admin_panel(ADMIN_ID, "🛍️ **Product Button Management**\nSelect what you want to modify:", markup)
 
@@ -351,15 +351,14 @@ def handle_callbacks(call):
             for p in DB_STATE.get("products", []):
                 markup.row(InlineKeyboardButton(f"✏️ Edit: {p['name']}", callback_data=f"adm_p_edit_{p['id']}"))
             markup.row(InlineKeyboardButton("🔙 Back to Button Menu", callback_data="adm_prod_menu"))
-            update_admin_panel(ADMIN_ID, "📌 Select a button to edit its Name, Details (Product details), Link or Payment text:", markup)
+            update_admin_panel(ADMIN_ID, "📌 Select a button to edit its Details, Link or Payment text:", markup)
 
         elif data.startswith("adm_p_edit_"):
             p_id = data.replace("adm_p_edit_", "")
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("✏️ Edit Name", callback_data=f"adm_ped_name_{p_id}"))
-            markup.row(InlineKeyboardButton("✏️ Edit Description (Details)", callback_data=f"adm_ped_desc_{p_id}"))
+            markup.row(InlineKeyboardButton("✏️ Edit Description", callback_data=f"adm_ped_desc_{p_id}"))
             markup.row(InlineKeyboardButton("🔗 Edit Link", callback_data=f"adm_ped_link_{p_id}"))
-            # 🔹 NEW BUTTON FOR SPECIFIC PAYMENT TEXT 🔹
             markup.row(InlineKeyboardButton("💳 Edit Payment Text", callback_data=f"adm_ped_paym_{p_id}")) 
             markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_prod_edit_list"))
             
@@ -386,7 +385,7 @@ def handle_callbacks(call):
         elif data.startswith("adm_ped_paym_"):
             p_id = data.replace("adm_ped_paym_", "")
             user_states[ADMIN_ID] = f"EDIT_P_PAYM_{p_id}"
-            update_admin_panel(ADMIN_ID, "💳 **Send new Payment Instructions specifically for this button:**\n(Send any text you want user to see when they click Buy Now on this product)", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data=f"adm_p_edit_{p_id}")))
+            update_admin_panel(ADMIN_ID, "💳 **Send new Payment Instructions specifically for this button:**\n(Send any text you want user to see when they click Buy Now)", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data=f"adm_p_edit_{p_id}")))
 
         elif data == "adm_prod_pos_list":
             markup = InlineKeyboardMarkup()
@@ -416,7 +415,6 @@ def handle_callbacks(call):
             user_states[ADMIN_ID] = f"ADM_UPL_PROD_VID_MULTIPLE_{p_id}"
 
         elif data.startswith("adm_p_finish_"):
-            bot.answer_callback_query(call.id, "Saved Videos Successfully!")
             show_main_admin_menu(ADMIN_ID)
 
         elif data == "adm_prod_del_vid_list":
@@ -451,7 +449,6 @@ def handle_callbacks(call):
                 m = InlineKeyboardMarkup()
                 m.row(InlineKeyboardButton("❌ Close Media", callback_data="del_msg"))
                 bot.send_video(ADMIN_ID, prod["videos"][idx], caption=f"🎥 Video {idx+1} of '{prod['name']}'", reply_markup=m)
-                bot.answer_callback_query(call.id)
 
         elif data.startswith("pv_del_"):
             _, _, p_id, idx_str = data.split("_")
@@ -460,7 +457,6 @@ def handle_callbacks(call):
             if prod and "videos" in prod and 0 <= idx < len(prod["videos"]):
                 prod["videos"].pop(idx)
                 save_db()
-                bot.answer_callback_query(call.id, "🗑️ Video Deleted!")
             call.data = f"adm_p_mngv_{p_id}"
             handle_callbacks(call)
 
@@ -470,7 +466,6 @@ def handle_callbacks(call):
             if prod:
                 prod["videos"] = []
                 save_db()
-                bot.answer_callback_query(call.id, "💥 All Videos Deleted!")
             call.data = f"adm_p_mngv_{p_id}"
             handle_callbacks(call)
 
@@ -485,7 +480,6 @@ def handle_callbacks(call):
             p_id = data.replace("adm_del_p_", "")
             DB_STATE["products"] = [p for p in DB_STATE["products"] if p["id"] != p_id]
             save_db()
-            bot.answer_callback_query(call.id, "🗑️ Button Deleted!")
             call.data = "adm_del_prod_list"
             handle_callbacks(call)
 
@@ -512,7 +506,6 @@ def handle_callbacks(call):
             curr = DB_STATE.get("layout_style", "vertical")
             DB_STATE["layout_style"] = "horizontal" if curr == "vertical" else "vertical"
             save_db()
-            bot.answer_callback_query(call.id, "📐 Layout Updated!")
             show_main_admin_menu(ADMIN_ID)
 
         elif data == "adm_set_how_vid":
@@ -549,7 +542,6 @@ def handle_callbacks(call):
             curr_status = DB_STATE.get("broadcast_enabled", True)
             DB_STATE["broadcast_enabled"] = not curr_status
             save_db()
-            bot.answer_callback_query(call.id, f"Auto-Broadcast is now {'ON 🟢' if DB_STATE['broadcast_enabled'] else 'OFF 🔴'}")
             show_main_admin_menu(ADMIN_ID)
 
         elif data == "adm_unblock_menu":
@@ -565,7 +557,6 @@ def handle_callbacks(call):
             if b_id in DB_STATE.get("blocked_users", []):
                 DB_STATE["blocked_users"].remove(b_id)
                 save_db()
-                bot.answer_callback_query(call.id, "🔓 User Unblocked!")
             call.data = "adm_unblock_menu"
             handle_callbacks(call)
 
@@ -574,7 +565,6 @@ def handle_callbacks(call):
 
         # Payment Validation Actions
         elif data.startswith("adm_confirm_"):
-            bot.answer_callback_query(call.id, "Processing...")
             try:
                 parts = data.split("_")
                 prod_id = parts[2]
@@ -589,7 +579,6 @@ def handle_callbacks(call):
                 print(f"Error confirm: {e}")
 
         elif data.startswith("adm_reject_"):
-            bot.answer_callback_query(call.id, "Rejecting...")
             try:
                 target_user = int(data.split("_")[2])
                 bot.send_message(target_user, "❌ 𝗣𝗮𝘆𝗺𝗲𝗻𝘁 𝗻𝗼𝘁 𝗿𝗲𝗰𝗶𝘃𝗲. 𝗣𝗹𝗲𝗮𝘀𝗲 𝘁𝗿𝘆 𝗮𝗴𝗮𝗶𝗻...")
@@ -599,7 +588,6 @@ def handle_callbacks(call):
                 print(f"Error reject: {e}")
 
         elif data.startswith("adm_block_"):
-            bot.answer_callback_query(call.id, "Blocking User...")
             try:
                 target_user = int(data.split("_")[2])
                 if target_user not in DB_STATE["blocked_users"]:
@@ -775,7 +763,7 @@ def handle_all_inputs(message):
                 "videos": [], 
                 "link": "https://example.com",
                 "position": new_pos,
-                "pay_msg": "" # Blank means it will use global default
+                "pay_msg": "" 
             })
             save_db()
             markup = InlineKeyboardMarkup()
@@ -825,6 +813,10 @@ def handle_all_inputs(message):
                 InlineKeyboardButton("BLOCK 🚫", callback_data=f"adm_block_{user_id}")
             )
             
+            # ⚡ FIX 2: GETTING PRODUCT NAME FOR ADMIN NOTIFICATION ⚡
+            prod = next((p for p in DB_STATE.get("products", []) if p["id"] == prod_id), None)
+            prod_name = prod["name"] if prod else "Unknown Product"
+
             username = message.from_user.username
             user_tag = f"@{username}" if username else "No Username"
             user_name = message.from_user.first_name or "User"
@@ -833,8 +825,9 @@ def handle_all_inputs(message):
                 bot.send_photo(
                     ADMIN_ID, 
                     photo_id, 
-                    caption=f"📸 New Payment Screenshot Received!\n\nUser: {user_tag}\nName: {user_name}\nID: {user_id}", 
-                    reply_markup=adm_markup
+                    caption=f"📸 **New Payment Screenshot!**\n\n🛍️ **Product:** {prod_name}\n👤 **User:** {user_tag}\n📛 **Name:** {user_name}\n🆔 **ID:** `{user_id}`", 
+                    reply_markup=adm_markup,
+                    parse_mode="Markdown"
                 )
             except Exception as e:
                 print(f"Error sending to admin: {e}")
