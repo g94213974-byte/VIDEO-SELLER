@@ -1,7 +1,6 @@
 import os
 import json
 import threading
-import requests
 from flask import Flask
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
@@ -27,10 +26,9 @@ DB_STATE = {
     "broadcast_minutes": 3, 
     "broadcast_enabled": True, 
     "layout_style": "vertical", 
-    "products": [], 
+    "products": [], # Each prod: {id, name, desc, videos, link, position, pay_msg}
     "blocked_users": [],
-    "users": [],
-    "buyers": [] # Paid Buyers list
+    "users": []
 }
 
 # --- TELEGRAM CHANNEL DATABASE LOGIC ---
@@ -42,7 +40,6 @@ def load_db():
             loaded_data = json.loads(chat.pinned_message.text)
             DB_STATE.update(loaded_data)
             if "broadcast_enabled" not in DB_STATE: DB_STATE["broadcast_enabled"] = True
-            if "buyers" not in DB_STATE: DB_STATE["buyers"] = []
             print("✅ Data loaded from Telegram Channel!")
     except Exception as e:
         print(f"⚠️ Saving initial DB: {e}")
@@ -94,7 +91,7 @@ def send_auto_broadcast():
     if not msg_text:
         return
     for u_id in DB_STATE.get("users", []):
-        if u_id == ADMIN_ID or u_id in DB_STATE.get("blocked_users", []):
+        if u_id in DB_STATE.get("blocked_users", []):
             continue
         try: bot.send_message(u_id, msg_text)
         except: pass
@@ -184,10 +181,7 @@ def show_main_admin_menu(chat_id):
     markup.row(InlineKeyboardButton("🎥 Set 'How To Use' Video", callback_data="adm_set_how_vid"))
     markup.row(InlineKeyboardButton("💳 Global Payment Config", callback_data="adm_pay_config_menu"))
     
-    buyers_count = len(DB_STATE.get("buyers", []))
-    markup.row(InlineKeyboardButton(f"👥 Paid Buyers ({buyers_count})", callback_data="adm_buyers_menu"))
-    
-    markup.row(InlineKeyboardButton("🚀 Send Broadcast to ALL Users", callback_data="adm_send_custom_bc"))
+    markup.row(InlineKeyboardButton("🚀 Send Custom Broadcast", callback_data="adm_send_custom_bc"))
     
     bc_mins = DB_STATE.get("broadcast_minutes", 3)
     bc_status = "🟢 ON" if DB_STATE.get("broadcast_enabled", True) else "🔴 OFF"
@@ -209,8 +203,11 @@ def show_main_admin_menu(chat_id):
 # ==========================================
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
-    try: bot.answer_callback_query(call.id)
-    except: pass
+    # ⚡ FIX 1: This makes buttons respond INSTANTLY instead of loading/spinning ⚡
+    try:
+        bot.answer_callback_query(call.id)
+    except:
+        pass
 
     user_id = call.message.chat.id
     data = call.data
@@ -332,37 +329,6 @@ def handle_callbacks(call):
             call.data = "adm_del_start_vid_list"
             handle_callbacks(call)
 
-        # PAID BUYERS MANAGEMENT
-        elif data == "adm_buyers_menu":
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("📢 Broadcast to Paid Buyers Only", callback_data="adm_bc_buyers"))
-            markup.row(InlineKeyboardButton("📜 View / Delete Paid Buyers", callback_data="adm_list_buyers"))
-            markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
-            b_count = len(DB_STATE.get("buyers", []))
-            update_admin_panel(ADMIN_ID, f"👥 **Paid Buyers Management**\n\nTotal Confirmed Buyers: {b_count}", markup)
-
-        elif data == "adm_bc_buyers":
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_buyers_menu"))
-            update_admin_panel(ADMIN_ID, "📢 **Send the broadcast message (Text, Photo, or Video)** to ONLY the Paid Buyers:", markup)
-            user_states[ADMIN_ID] = "WAITING_BUYERS_BROADCAST"
-
-        elif data == "adm_list_buyers":
-            markup = InlineKeyboardMarkup()
-            buyers = DB_STATE.get("buyers", [])
-            for b_id in buyers:
-                markup.row(InlineKeyboardButton(f"🗑️ Remove Buyer ID: {b_id}", callback_data=f"adm_rm_buyer_{b_id}"))
-            markup.row(InlineKeyboardButton("🔙 Back to Buyers Menu", callback_data="adm_buyers_menu"))
-            update_admin_panel(ADMIN_ID, "📜 **Paid Buyers List:**\nClick a user ID below to remove them from the buyers list:", markup)
-
-        elif data.startswith("adm_rm_buyer_"):
-            b_id = int(data.replace("adm_rm_buyer_", ""))
-            if b_id in DB_STATE.get("buyers", []):
-                DB_STATE["buyers"].remove(b_id)
-                save_db()
-            call.data = "adm_list_buyers"
-            handle_callbacks(call)
-
         elif data == "adm_prod_menu":
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("❇️ Add New Button", callback_data="adm_add_prod"))
@@ -419,7 +385,7 @@ def handle_callbacks(call):
         elif data.startswith("adm_ped_paym_"):
             p_id = data.replace("adm_ped_paym_", "")
             user_states[ADMIN_ID] = f"EDIT_P_PAYM_{p_id}"
-            update_admin_panel(ADMIN_ID, "💳 **Send new Payment Instructions specifically for this button:**", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data=f"adm_p_edit_{p_id}")))
+            update_admin_panel(ADMIN_ID, "💳 **Send new Payment Instructions specifically for this button:**\n(Send any text you want user to see when they click Buy Now)", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data=f"adm_p_edit_{p_id}")))
 
         elif data == "adm_prod_pos_list":
             markup = InlineKeyboardMarkup()
@@ -557,7 +523,7 @@ def handle_callbacks(call):
         elif data == "adm_send_custom_bc":
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_back_panel"))
-            update_admin_panel(ADMIN_ID, "🚀 **Send the message (Text, Photo, or Video)** that you want to broadcast to ALL users:", markup)
+            update_admin_panel(ADMIN_ID, "🚀 **Send the message (Text, Photo, or Video)** that you want to broadcast to all users right now:", markup)
             user_states[ADMIN_ID] = "WAITING_CUSTOM_BROADCAST"
 
         elif data == "adm_set_bc_text":
@@ -597,23 +563,17 @@ def handle_callbacks(call):
         elif data == "adm_back_panel":
             show_main_admin_menu(ADMIN_ID)
 
-        # PAYMENT VALIDATION ACTIONS
+        # Payment Validation Actions
         elif data.startswith("adm_confirm_"):
             try:
                 parts = data.split("_")
                 prod_id = parts[2]
                 target_user = int(parts[3])
-                
-                if "buyers" not in DB_STATE: DB_STATE["buyers"] = []
-                if target_user not in DB_STATE["buyers"]:
-                    DB_STATE["buyers"].append(target_user)
-                    save_db()
-
                 prod = next((p for p in DB_STATE["products"] if p["id"] == prod_id), None)
                 link = prod.get("link", "No link") if prod else "No link"
                 bot.send_message(target_user, f"✅ **Payment Confirmed!**\n\nLink:\n🔗 {link}", parse_mode="Markdown")
                 
-                try: bot.edit_message_caption(caption=f"{call.message.caption}\n\n✅ **Status:** Confirmed & Saved to Buyers List!", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
+                try: bot.edit_message_caption(caption=f"{call.message.caption}\n\n✅ **Status:** Confirmed & Link Sent!", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
                 except: pass
             except Exception as e:
                 print(f"Error confirm: {e}")
@@ -741,7 +701,7 @@ def handle_all_inputs(message):
             success_count = 0
             fail_count = 0
             for u_id in DB_STATE.get("users", []):
-                if u_id == ADMIN_ID or u_id in DB_STATE.get("blocked_users", []): continue
+                if u_id in DB_STATE.get("blocked_users", []): continue
                 try:
                     bot.copy_message(chat_id=u_id, from_chat_id=ADMIN_ID, message_id=message.message_id)
                     success_count += 1
@@ -749,24 +709,7 @@ def handle_all_inputs(message):
             
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
-            update_admin_panel(ADMIN_ID, f"✅ **All Users Broadcast Completed!**\n\n- Successfully sent: {success_count}\n- Failed: {fail_count}", markup)
-            return
-
-        elif state == "WAITING_BUYERS_BROADCAST":
-            user_states.pop(user_id, None)
-            update_admin_panel(ADMIN_ID, "🚀 Broadcasting message to PAID BUYERS ONLY... Please wait.", None)
-            success_count = 0
-            fail_count = 0
-            for u_id in DB_STATE.get("buyers", []):
-                if u_id == ADMIN_ID or u_id in DB_STATE.get("blocked_users", []): continue
-                try:
-                    bot.copy_message(chat_id=u_id, from_chat_id=ADMIN_ID, message_id=message.message_id)
-                    success_count += 1
-                except: fail_count += 1
-            
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("🔙 Back to Buyers Menu", callback_data="adm_buyers_menu"))
-            update_admin_panel(ADMIN_ID, f"✅ **Buyers Broadcast Completed!**\n\n- Successfully sent: {success_count}\n- Failed: {fail_count}", markup)
+            update_admin_panel(ADMIN_ID, f"✅ **Broadcast Completed!**\n\n- Successfully sent: {success_count}\n- Failed: {fail_count}", markup)
             return
 
         elif state == "ADM_SET_WELCOME" and message.text:
@@ -860,11 +803,9 @@ def handle_all_inputs(message):
         prod_id = state.replace("WAITING_SCREENSHOT_", "")
         if message.content_type == 'photo':
             user_states.pop(user_id, None)
+            bot.send_message(user_id, "⏳𝗖𝗵𝗲𝗰𝗸𝗶𝗻𝗴 𝘆𝗼𝘂𝗿 𝗽𝗮𝘆𝗺𝗲𝗻𝘁....   𝗣𝗹𝗲𝗮𝘀𝗲 𝘄𝗮𝗶𝘁 𝟱-𝟭𝟬 𝗺𝗶𝗻. ")
+
             photo_id = message.photo[-1].file_id
-
-            # Manual confirmation flow: No automated check, directly sent to admin
-            bot.send_message(user_id, "⏳ আপনার পেমেন্ট স্ক্রিনশট সফলভাবে জমা হয়েছে। অনুগ্রহ করে ৫-১০ মিনিট অপেক্ষা করুন, অ্যাডমিন চেক করে কনফার্ম করবেন।")
-
             adm_markup = InlineKeyboardMarkup()
             adm_markup.row(
                 InlineKeyboardButton("CONFIRM ✅", callback_data=f"adm_confirm_{prod_id}_{user_id}"),
@@ -872,6 +813,7 @@ def handle_all_inputs(message):
                 InlineKeyboardButton("BLOCK 🚫", callback_data=f"adm_block_{user_id}")
             )
             
+            # ⚡ FIX 2: GETTING PRODUCT NAME FOR ADMIN NOTIFICATION ⚡
             prod = next((p for p in DB_STATE.get("products", []) if p["id"] == prod_id), None)
             prod_name = prod["name"] if prod else "Unknown Product"
 
@@ -883,7 +825,7 @@ def handle_all_inputs(message):
                 bot.send_photo(
                     ADMIN_ID, 
                     photo_id, 
-                    caption=f"📸 **নতুন পেমেন্ট স্ক্রিনশট (ম্যানুয়াল রিভিউ):**\n\n🛍️ **পণ্য:** {prod_name}\n👤 **ইউজার:** {user_tag}\n📛 **নাম:** {user_name}\n🆔 **আইডি:** `{user_id}`", 
+                    caption=f"📸 **New Payment Screenshot!**\n\n🛍️ **Product:** {prod_name}\n👤 **User:** {user_tag}\n📛 **Name:** {user_name}\n🆔 **ID:** `{user_id}`", 
                     reply_markup=adm_markup,
                     parse_mode="Markdown"
                 )
