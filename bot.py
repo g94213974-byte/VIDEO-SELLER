@@ -12,10 +12,6 @@ TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
 LOG_CHANNEL_ID = int(os.environ.get('LOG_CHANNEL_ID', '0')) # Private Channel ID for DB
 
-# --- FUNTUAN API CONFIGURATION ---
-FUNTUAN_API_KEY = os.environ.get('FUNTUAN_API_KEY', 'YOUR_FUNTUAN_API_KEY_HERE')
-FUNTUAN_API_URL = "https://api.funtuan.com/v1/verify" # আপনার প্রয়োজন অনুযায়ী এন্ডপয়েন্ট ইউআরএল পরিবর্তন করে নিতে পারেন
-
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
@@ -31,7 +27,7 @@ DB_STATE = {
     "broadcast_minutes": 3, 
     "broadcast_enabled": True, 
     "layout_style": "vertical", 
-    "products": [], # Each prod: {id, name, desc, videos, link, position, pay_msg}
+    "products": [], 
     "blocked_users": [],
     "users": [],
     "buyers": [] # Paid Buyers list
@@ -69,73 +65,6 @@ load_db()
 
 user_states = {}
 admin_panel_msgs = {} 
-
-# --- FUNTUAN API & OCR PAYMENT SCREENSHOT VERIFIER ---
-def verify_payment_via_funtuan(photo_id, user_id):
-    """
-    এখানে Funtuan API Key ব্যবহার করে পেমেন্ট ভেরিফাই করার ফাংশন যুক্ত করা হয়েছে।
-    """
-    try:
-        file_info = bot.get_file(photo_id)
-        file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}"
-        
-        # Funtuan API Payload (আপনার ডকুমেন্টেশন অনুযায়ী প্যারামিটার অ্যাড করে নেবেন)
-        headers = {
-            "Authorization": f"Bearer {FUNTUAN_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "image_url": file_url,
-            "user_id": str(user_id)
-        }
-        
-        # রেসপন্স চেক করার জন্য রিকোয়েস্ট পাঠানো (ফেইল করলে ফলব্যাক হিসেবে OCR ভেরিফিকেশন কাজ করবে)
-        response = requests.post(FUNTUAN_API_URL, json=payload, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            res_data = response.json()
-            # ধরে নিচ্ছি Funtuan API সফল পেমেন্টে "status": "success" বা ট্রু রিটার্ন করে
-            if res_data.get("status") == "success" or res_data.get("verified") == True:
-                return True
-        
-    except Exception as e:
-        print(f"⚠️ Funtuan API Error: {e}, falling back to OCR check.")
-    
-    # ব্যাকআপ OCR মেথড (যদি Funtuan API কোনো কারণে ডাউন থাকে)
-    return verify_payment_screenshot(photo_id)
-
-def verify_payment_screenshot(photo_id):
-    try:
-        file_info = bot.get_file(photo_id)
-        file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}"
-        
-        # Free OCR API call
-        payload = {
-            'url': file_url,
-            'isOverlayRequired': False,
-            'apikey': 'helloworld', 
-            'language': 'eng',
-        }
-        r = requests.post('https://api.ocr.space/parse/image', data=payload, timeout=8)
-        res = r.json()
-        
-        if not res.get("IsErroredOnProcessing") and res.get("ParsedResults"):
-            text = res["ParsedResults"][0].get("ParsedText", "").lower()
-            
-            # Match keywords (Status, UPI Identifiers, App names, or numbers like 2, 4, 9)
-            keywords = [
-                "successful", "paid", "completed", "sent", "transferred",
-                "utr", "upi", "ref", "txn", "transaction",
-                "phonepe", "gpay", "paytm", "bhim", "google pay", "amazon pay",
-                "inr", "rs", "₹", "2", "4", "9"
-            ]
-            
-            if any(kw in text for kw in keywords):
-                return True
-    except Exception as e:
-        print(f"OCR Check Error: {e}")
-        return True 
-    return False
 
 # --- HELPER FUNCTION: SEND VIDEOS AS ALBUM GRID ---
 def send_videos_as_album(chat_id, video_list):
@@ -933,14 +862,8 @@ def handle_all_inputs(message):
             user_states.pop(user_id, None)
             photo_id = message.photo[-1].file_id
 
-            # ⚡ FUNTUAN API & OCR VALIDATION FOR FAKE IMAGE FILTERING ⚡
-            is_valid_ss = verify_payment_via_funtuan(photo_id, user_id)
-
-            if not is_valid_ss:
-                bot.send_message(user_id, "❌ 𝗣𝗮𝘆𝗺𝗲𝗻𝘁 𝗻𝗼𝘁 𝗿𝗲𝗰𝗶𝘃𝗲. 𝗣𝗹𝗲𝗮𝘀𝗲 𝘁𝗿𝘆 𝗮𝗴𝗮𝗶𝗻...")
-                return
-
-            bot.send_message(user_id, "⏳𝗖𝗵𝗲𝗰𝗸𝗶𝗻𝗴 𝘆𝗼𝘂𝗿 𝗽𝗮𝘆𝗺𝗲𝗻𝘁....   𝗣𝗹𝗲𝗮𝘀𝗲 𝘄𝗮𝗶𝘁 𝟱-𝟭𝟬 𝗺𝗶𝗻. ")
+            # Manual confirmation flow: No automated check, directly sent to admin
+            bot.send_message(user_id, "⏳ আপনার পেমেন্ট স্ক্রিনশট সফলভাবে জমা হয়েছে। অনুগ্রহ করে ৫-১০ মিনিট অপেক্ষা করুন, অ্যাডমিন চেক করে কনফার্ম করবেন।")
 
             adm_markup = InlineKeyboardMarkup()
             adm_markup.row(
@@ -960,7 +883,7 @@ def handle_all_inputs(message):
                 bot.send_photo(
                     ADMIN_ID, 
                     photo_id, 
-                    caption=f"📸 **New Payment Screenshot (Funtuan Verified)!**\n\n🛍️ **Product:** {prod_name}\n👤 **User:** {user_tag}\n📛 **Name:** {user_name}\n🆔 **ID:** `{user_id}`", 
+                    caption=f"📸 **নতুন পেমেন্ট স্ক্রিনশট (ম্যানুয়াল রিভিউ):**\n\n🛍️ **পণ্য:** {prod_name}\n👤 **ইউজার:** {user_tag}\n📛 **নাম:** {user_name}\n🆔 **আইডি:** `{user_id}`", 
                     reply_markup=adm_markup,
                     parse_mode="Markdown"
                 )
