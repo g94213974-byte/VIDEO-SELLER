@@ -24,9 +24,9 @@ DB_STATE = {
     "reject_msg": "❌ 𝗣𝗮𝘆𝗺𝗲𝗻𝘁 𝗻𝗼𝘁 𝗿𝗲𝗰𝗶𝘃𝗲. 𝗣𝗹𝗲𝗮𝘀𝗲 𝘁𝗿𝘆 𝗮𝗴𝗮𝗶𝗻...",
     "broadcast_msg": "",
     "broadcast_minutes": 3, 
-    "broadcast_enabled": True, # Auto Broadcast ON/OFF state
+    "broadcast_enabled": True, 
     "layout_style": "vertical", 
-    "products": [], # Each prod: {id, name, desc, videos, link, position}
+    "products": [], # Each prod: {id, name, desc, videos, link, position, pay_msg}
     "blocked_users": [],
     "users": []
 }
@@ -39,7 +39,6 @@ def load_db():
         if chat.pinned_message and chat.pinned_message.text:
             loaded_data = json.loads(chat.pinned_message.text)
             DB_STATE.update(loaded_data)
-            # Ensure new keys exist if loading old db
             if "broadcast_enabled" not in DB_STATE: DB_STATE["broadcast_enabled"] = True
             print("✅ Data loaded from Telegram Channel!")
     except Exception as e:
@@ -131,7 +130,6 @@ def start_command(message):
     if user_id == ADMIN_ID:
         markup.row(InlineKeyboardButton("⚙️ Open Admin Panel ⚙️", callback_data="adm_open_panel"))
 
-    # Sort products by position if available
     products = sorted(DB_STATE.get("products", []), key=lambda x: x.get("position", 999))
     layout = DB_STATE.get("layout_style", "vertical")
 
@@ -181,7 +179,7 @@ def show_main_admin_menu(chat_id):
     markup.row(InlineKeyboardButton(f"📐 Change Layout: {layout_icon}", callback_data="adm_toggle_layout"))
     
     markup.row(InlineKeyboardButton("🎥 Set 'How To Use' Video", callback_data="adm_set_how_vid"))
-    markup.row(InlineKeyboardButton("💳 Set Payment QR & Instructions", callback_data="adm_pay_config_menu"))
+    markup.row(InlineKeyboardButton("💳 Global Payment Config", callback_data="adm_pay_config_menu"))
     
     markup.row(InlineKeyboardButton("🚀 Send Custom Broadcast Now", callback_data="adm_send_custom_bc"))
     
@@ -250,14 +248,23 @@ def handle_callbacks(call):
 
     elif data.startswith("buynow_"):
         prod_id = data.split("_")[1]
+        prod = next((p for p in DB_STATE["products"] if p["id"] == prod_id), None)
         markup = InlineKeyboardMarkup()
         markup.row(InlineKeyboardButton("I have paid ✅", callback_data=f"paid_{prod_id}"))
         markup.row(InlineKeyboardButton("Cancel ❌", callback_data="back_home"))
 
-        pay_msg = DB_STATE.get("payment_msg", "Please pay and submit screenshot.")
+        # 🔹 INDIVIDUAL PAYMENT MESSAGE LOGIC 🔹
+        if prod and prod.get("pay_msg"):
+            pay_msg = prod["pay_msg"]
+        else:
+            pay_msg = DB_STATE.get("payment_msg", "💳 **Payment Instructions**\n\nPlease scan the QR and pay, then click 'I have paid'.")
+            
         pay_photo = DB_STATE.get("payment_photo", "")
-        if pay_photo: bot.send_photo(user_id, pay_photo, caption=pay_msg, reply_markup=markup, parse_mode="Markdown")
-        else: bot.send_message(user_id, pay_msg, reply_markup=markup, parse_mode="Markdown")
+        
+        if pay_photo: 
+            bot.send_photo(user_id, pay_photo, caption=pay_msg, reply_markup=markup, parse_mode="Markdown")
+        else: 
+            bot.send_message(user_id, pay_msg, reply_markup=markup, parse_mode="Markdown")
 
     elif data.startswith("paid_"):
         prod_id = data.split("_")[1]
@@ -266,7 +273,7 @@ def handle_callbacks(call):
 
     # --- ADMIN ACTIONS ---
     if user_id == ADMIN_ID:
-        # Start Videos Menu
+        
         if data == "adm_start_vids_menu":
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("➕ Add Start Videos", callback_data="adm_add_start_vid"))
@@ -322,7 +329,6 @@ def handle_callbacks(call):
             call.data = "adm_del_start_vid_list"
             handle_callbacks(call)
 
-        # Product Buttons & Details Menu
         elif data == "adm_prod_menu":
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("❇️ Add New Button", callback_data="adm_add_prod"))
@@ -345,7 +351,7 @@ def handle_callbacks(call):
             for p in DB_STATE.get("products", []):
                 markup.row(InlineKeyboardButton(f"✏️ Edit: {p['name']}", callback_data=f"adm_p_edit_{p['id']}"))
             markup.row(InlineKeyboardButton("🔙 Back to Button Menu", callback_data="adm_prod_menu"))
-            update_admin_panel(ADMIN_ID, "📌 Select a button to edit its Name, Details (Product details) or Link:", markup)
+            update_admin_panel(ADMIN_ID, "📌 Select a button to edit its Name, Details (Product details), Link or Payment text:", markup)
 
         elif data.startswith("adm_p_edit_"):
             p_id = data.replace("adm_p_edit_", "")
@@ -353,10 +359,14 @@ def handle_callbacks(call):
             markup.row(InlineKeyboardButton("✏️ Edit Name", callback_data=f"adm_ped_name_{p_id}"))
             markup.row(InlineKeyboardButton("✏️ Edit Description (Details)", callback_data=f"adm_ped_desc_{p_id}"))
             markup.row(InlineKeyboardButton("🔗 Edit Link", callback_data=f"adm_ped_link_{p_id}"))
+            # 🔹 NEW BUTTON FOR SPECIFIC PAYMENT TEXT 🔹
+            markup.row(InlineKeyboardButton("💳 Edit Payment Text", callback_data=f"adm_ped_paym_{p_id}")) 
             markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_prod_edit_list"))
+            
             prod = next((p for p in DB_STATE["products"] if p["id"] == p_id), None)
             if prod:
-                update_admin_panel(ADMIN_ID, f"✏️ **Editing Button:** `{prod['name']}`\n\n- Current Desc: {prod.get('desc', '')}\n- Current Link: {prod.get('link', '')}\n\nChoose what to change:", markup)
+                custom_pay = prod.get('pay_msg', 'Using Global Default Message')
+                update_admin_panel(ADMIN_ID, f"✏️ **Editing Button:** `{prod['name']}`\n\n- Current Desc: {prod.get('desc', '')}\n- Current Link: {prod.get('link', '')}\n- Payment Text: {custom_pay}\n\nChoose what to change:", markup)
 
         elif data.startswith("adm_ped_name_"):
             p_id = data.replace("adm_ped_name_", "")
@@ -372,6 +382,11 @@ def handle_callbacks(call):
             p_id = data.replace("adm_ped_link_", "")
             user_states[ADMIN_ID] = f"EDIT_P_LINK_{p_id}"
             update_admin_panel(ADMIN_ID, "🔗 Send new delivery link:", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data=f"adm_p_edit_{p_id}")))
+
+        elif data.startswith("adm_ped_paym_"):
+            p_id = data.replace("adm_ped_paym_", "")
+            user_states[ADMIN_ID] = f"EDIT_P_PAYM_{p_id}"
+            update_admin_panel(ADMIN_ID, "💳 **Send new Payment Instructions specifically for this button:**\n(Send any text you want user to see when they click Buy Now on this product)", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data=f"adm_p_edit_{p_id}")))
 
         elif data == "adm_prod_pos_list":
             markup = InlineKeyboardMarkup()
@@ -476,15 +491,15 @@ def handle_callbacks(call):
 
         elif data == "adm_pay_config_menu":
             markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("💳 Set Payment QR / Photo", callback_data="adm_set_pay_photo"))
-            markup.row(InlineKeyboardButton("✏️ Edit Payment Instructions Text", callback_data="adm_edit_pay_msg"))
+            markup.row(InlineKeyboardButton("💳 Set Global Payment QR/Photo", callback_data="adm_set_pay_photo"))
+            markup.row(InlineKeyboardButton("✏️ Edit Global Payment Text", callback_data="adm_edit_pay_msg"))
             markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
-            update_admin_panel(ADMIN_ID, "💳 **Payment Configuration Menu**\nChoose what to configure:", markup)
+            update_admin_panel(ADMIN_ID, "💳 **Global Payment Configuration**\n(This will be used if a button does not have its own specific payment text)", markup)
 
         elif data == "adm_edit_pay_msg":
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_pay_config_menu"))
-            update_admin_panel(ADMIN_ID, f"✍️ **Current Payment Instructions:**\n\n`{DB_STATE.get('payment_msg', '')}`\n\nSend new payment instructions text:", markup)
+            update_admin_panel(ADMIN_ID, f"✍️ **Current Global Payment Instructions:**\n\n`{DB_STATE.get('payment_msg', '')}`\n\nSend new payment instructions text:", markup)
             user_states[ADMIN_ID] = "ADM_SET_PAY_MSG_TEXT"
 
         elif data == "adm_edit_welcome":
@@ -667,6 +682,16 @@ def handle_all_inputs(message):
             user_states.pop(user_id, None)
             show_main_admin_menu(ADMIN_ID)
             return
+            
+        elif state.startswith("EDIT_P_PAYM_") and message.text:
+            p_id = state.replace("EDIT_P_PAYM_", "")
+            prod = next((p for p in DB_STATE["products"] if p["id"] == p_id), None)
+            if prod:
+                prod["pay_msg"] = message.text
+                save_db()
+            user_states.pop(user_id, None)
+            show_main_admin_menu(ADMIN_ID)
+            return
 
         elif state.startswith("EDIT_P_POS_") and message.text:
             p_id = state.replace("EDIT_P_POS_", "")
@@ -749,7 +774,8 @@ def handle_all_inputs(message):
                 "desc": "Product details", 
                 "videos": [], 
                 "link": "https://example.com",
-                "position": new_pos
+                "position": new_pos,
+                "pay_msg": "" # Blank means it will use global default
             })
             save_db()
             markup = InlineKeyboardMarkup()
