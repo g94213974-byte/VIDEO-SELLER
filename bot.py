@@ -9,7 +9,7 @@ import re
 # --- ENVIRONMENT VARIABLES ---
 TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
-LOG_CHANNEL_ID = int(os.environ.get('LOG_CHANNEL_ID', '0')) # Private Channel ID for DB
+LOG_CHANNEL_ID = int(os.environ.get('LOG_CHANNEL_ID', '0'))
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
@@ -23,10 +23,10 @@ DB_STATE = {
     "payment_msg": "💳 **Payment Instructions**\n\nPlease scan the QR and pay, then click 'I have paid'.",
     "reject_msg": "❌ 𝗣𝗮𝘆𝗺𝗲𝗻𝘁 𝗻𝗼𝘁 𝗿𝗲𝗰𝗶𝘃𝗲. 𝗣𝗹𝗲𝗮𝘀𝗲 𝘁𝗿𝘆 𝗮𝗴𝗮𝗶𝗻...",
     "layout_style": "vertical", 
-    "products": [], # Each prod: {id, name, desc, videos, link, position, pay_msg}
+    "products": [],
     "blocked_users": [],
     "users": [],
-    "buyers": [] # List of users who bought something: {user_id, username, product_name, amount_info, date}
+    "buyers": []
 }
 
 # --- TELEGRAM CHANNEL DATABASE LOGIC ---
@@ -38,9 +38,7 @@ def load_db():
             loaded_data = json.loads(chat.pinned_message.text)
             DB_STATE.update(loaded_data)
             if "buyers" not in DB_STATE: DB_STATE["buyers"] = []
-            print("✅ Data loaded from Telegram Channel!")
     except Exception as e:
-        print(f"⚠️ Saving initial DB: {e}")
         save_db()
 
 def save_db():
@@ -52,16 +50,14 @@ def save_db():
         else:
             msg = bot.send_message(LOG_CHANNEL_ID, json_data)
             bot.pin_chat_message(LOG_CHANNEL_ID, msg.message_id)
-        print("💾 DB saved to Telegram Channel.")
     except Exception as e:
-        print(f"❌ Error saving DB: {e}")
+        pass
 
 load_db()
 
 user_states = {}
 admin_panel_msgs = {} 
 
-# --- HELPER FUNCTION: SEND VIDEOS AS ALBUM GRID ---
 def send_videos_as_album(chat_id, video_list):
     if not video_list:
         return
@@ -79,9 +75,6 @@ def send_videos_as_album(chat_id, video_list):
                     try: bot.send_video(chat_id, v)
                     except: pass
 
-# ==========================================
-# 🚀 USER & ADMIN /START COMMAND
-# ==========================================
 @bot.message_handler(commands=['start', 'admin'])
 def start_command(message):
     user_id = message.chat.id
@@ -124,9 +117,6 @@ def start_command(message):
 
     bot.send_message(user_id, welcome_text, reply_markup=markup, parse_mode="Markdown")
 
-# ==========================================
-# 🛠️ ADMIN IN-PLACE PANEL SYSTEM
-# ==========================================
 def update_admin_panel(chat_id, text, markup):
     msg_id = admin_panel_msgs.get(chat_id)
     if msg_id:
@@ -164,9 +154,6 @@ def show_main_admin_menu(chat_id):
     text = "👑 **Admin Control Panel**\n\nChoose an option below to customize your bot completely:"
     update_admin_panel(chat_id, text, markup)
 
-# ==========================================
-# 🔄 CALLBACK QUERY HANDLER
-# ==========================================
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
     try:
@@ -189,7 +176,6 @@ def handle_callbacks(call):
         except: pass
         return
 
-    # --- USER CALLBACKS ---
     if data == "back_home":
         try: bot.delete_message(user_id, msg_id)
         except: pass
@@ -231,9 +217,7 @@ def handle_callbacks(call):
         bot.send_message(user_id, "📸 Please send your payment screenshot.")
         user_states[user_id] = f"WAITING_SCREENSHOT_{prod_id}"
 
-    # --- ADMIN ACTIONS ---
     if user_id == ADMIN_ID:
-        
         if data == "adm_start_vids_menu":
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("➕ Add Start Videos", callback_data="adm_add_start_vid"))
@@ -561,7 +545,7 @@ def handle_callbacks(call):
                         bot.edit_message_text(f"{call.message.text}\n\n✅ **Status:** Confirmed & Link Sent!", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
                     except: pass
             except Exception as e:
-                print(f"Error confirm: {e}")
+                pass
 
         elif data.startswith("adm_reject_"):
             try:
@@ -574,7 +558,7 @@ def handle_callbacks(call):
                         bot.edit_message_text(f"{call.message.text}\n\n❌ **Status:** Rejected by Admin", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
                     except: pass
             except Exception as e:
-                print(f"Error reject: {e}")
+                pass
 
         elif data.startswith("adm_block_"):
             try:
@@ -589,11 +573,8 @@ def handle_callbacks(call):
                         bot.edit_message_text(f"{call.message.text}\n\n🚫 **Status:** User Blocked!", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
                     except: pass
             except Exception as e:
-                print(f"Error block: {e}")
+                pass
 
-# ==========================================
-# 📩 INPUT & MEDIA HANDLER
-# ==========================================
 @bot.message_handler(content_types=['photo', 'video', 'text', 'document'])
 def handle_all_inputs(message):
     user_id = message.chat.id
@@ -601,7 +582,6 @@ def handle_all_inputs(message):
     if user_id in DB_STATE.get("blocked_users", []):
         return
 
-    # Direct Reply handling for reports sent by users (FIXED)
     if user_id == ADMIN_ID and message.reply_to_message:
         replied_msg = message.reply_to_message.text or message.reply_to_message.caption or ""
         match_id = re.search(r'`(\d+)`', replied_msg)
@@ -712,7 +692,6 @@ def handle_all_inputs(message):
                     bot.copy_message(chat_id=u_id, from_chat_id=ADMIN_ID, message_id=message.message_id)
                     success_count += 1
                 except Exception as e: 
-                    print(f"Broadcast error for {u_id}: {e}")
                     fail_count += 1
             
             markup = InlineKeyboardMarkup()
@@ -734,7 +713,6 @@ def handle_all_inputs(message):
                     bot.copy_message(chat_id=u_id, from_chat_id=ADMIN_ID, message_id=message.message_id)
                     success_count += 1
                 except Exception as e:
-                    print(f"Buyer Broadcast error for {u_id}: {e}")
                     fail_count += 1
 
             markup = InlineKeyboardMarkup()
@@ -817,7 +795,6 @@ def handle_all_inputs(message):
             show_main_admin_menu(ADMIN_ID)
             return
 
-    # User Inputs
     if state == "WAITING_REPORT":
         user_states.pop(user_id, None)
         bot.send_message(user_id, "✅ Your report has been sent to admin.")
@@ -855,11 +832,8 @@ def handle_all_inputs(message):
                     parse_mode="Markdown"
                 )
             except Exception as e:
-                print(f"Error sending to admin: {e}")
+                pass
 
-# ==========================================
-# 🌐 FLASK KEEP-ALIVE SERVER
-# ==========================================
 @app.route('/')
 def home():
     return "Bot is running on Render!"
