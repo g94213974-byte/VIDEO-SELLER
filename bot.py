@@ -94,7 +94,6 @@ def auto_broadcast_worker():
                 interval = bc_config.get("interval_seconds")
                 time.sleep(interval)
                 
-                # Re-check status after sleep
                 if not DB_STATE.get("auto_bc", {}).get("status"):
                     continue
 
@@ -106,7 +105,7 @@ def auto_broadcast_worker():
                     if u_id in DB_STATE.get("blocked_users", []):
                         continue
                     try:
-                        if m_type == "text":
+                        if m_type == "text" or not m_type:
                             bot.send_message(u_id, txt, parse_mode="Markdown")
                         elif m_type == "photo":
                             bot.send_photo(u_id, f_id, caption=txt, parse_mode="Markdown")
@@ -164,15 +163,19 @@ def start_command(message):
     bot.send_message(user_id, welcome_text, reply_markup=markup, parse_mode="Markdown")
 
 def update_admin_panel(chat_id, text, markup):
-    msg_id = admin_panel_msgs.get(chat_id)
-    if msg_id:
-        try:
-            bot.edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode="Markdown")
-            return
-        except Exception:
-            pass
-    msg = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-    admin_panel_msgs[chat_id] = msg.message_id
+    try:
+        msg_id = admin_panel_msgs.get(chat_id)
+        if msg_id:
+            try:
+                bot.edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode="Markdown")
+                return
+            except Exception:
+                pass # Jodi edit na hoy, tahole notun message pathabe nicher line- e
+        
+        msg = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        admin_panel_msgs[chat_id] = msg.message_id
+    except Exception as e:
+        print(f"Admin panel error: {e}")
 
 def show_main_admin_menu(chat_id):
     user_states.pop(chat_id, None) 
@@ -532,7 +535,6 @@ def handle_callbacks(call):
             status_str = "🟢 ON" if bc.get("status") else "🔴 OFF"
             interval_sec = bc.get("interval_seconds", 3600)
             
-            # Format interval nicely
             if interval_sec < 60:
                 interval_txt = f"{interval_sec} Seconds"
             elif interval_sec < 3600:
@@ -587,7 +589,7 @@ def handle_callbacks(call):
                 InlineKeyboardButton("24 Hours", callback_data="adm_autobc_t_86400")
             )
             markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_autobc_menu"))
-            update_admin_panel(ADMIN_ID, "⏱️ **Select or type time interval between messages:**\n(You can also type custom seconds by replying or choosing options)", markup)
+            update_admin_panel(ADMIN_ID, "⏱️ **Select time interval between automatic messages:**", markup)
 
         elif data.startswith("adm_autobc_t_"):
             secs = int(data.replace("adm_autobc_t_", ""))
