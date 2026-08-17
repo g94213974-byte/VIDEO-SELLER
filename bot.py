@@ -198,7 +198,10 @@ def handle_callbacks(call):
             if p_videos: 
                 send_videos_as_album(user_id, p_videos)
             
-            caption = f"📌 **{prod['name']}**\n\n{prod.get('desc', 'Product details')}"
+            desc_text = prod.get('desc', '')
+            caption = f"📌 **{prod['name']}**"
+            if desc_text:
+                caption += f"\n\n{desc_text}"
             
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("I have paid ✅", callback_data=f"paid_{prod_id}"))
@@ -298,6 +301,7 @@ def handle_callbacks(call):
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("✏️ Edit Name", callback_data=f"adm_ped_name_{p_id}"))
             markup.row(InlineKeyboardButton("✏️ Edit Description", callback_data=f"adm_ped_desc_{p_id}"))
+            markup.row(InlineKeyboardButton("🧹 Clear Description", callback_data=f"adm_ped_cleardesc_{p_id}"))
             markup.row(InlineKeyboardButton("🔗 Edit Link", callback_data=f"adm_ped_link_{p_id}"))
             markup.row(InlineKeyboardButton("💳 Edit Payment Text", callback_data=f"adm_ped_paym_{p_id}")) 
             markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_prod_edit_list"))
@@ -306,6 +310,15 @@ def handle_callbacks(call):
             if prod:
                 custom_pay = prod.get('pay_msg', 'Using Global Default Message')
                 update_admin_panel(ADMIN_ID, f"✏️ **Editing Button:** `{prod['name']}`\n\n- Current Desc: {prod.get('desc', '')}\n- Current Link: {prod.get('link', '')}\n- Payment Text: {custom_pay}\n\nChoose what to change:", markup)
+
+        elif data.startswith("adm_ped_cleardesc_"):
+            p_id = data.replace("adm_ped_cleardesc_", "")
+            prod = next((p for p in DB_STATE["products"] if p["id"] == p_id), None)
+            if prod:
+                prod["desc"] = ""
+                save_db()
+            call.data = f"adm_p_edit_{p_id}"
+            handle_callbacks(call)
 
         elif data.startswith("adm_ped_name_"):
             p_id = data.replace("adm_ped_name_", "")
@@ -761,7 +774,7 @@ def handle_all_inputs(message):
             DB_STATE["products"].append({
                 "id": new_id, 
                 "name": message.text, 
-                "desc": "Product details", 
+                "desc": "", 
                 "videos": [], 
                 "link": "https://example.com",
                 "position": new_pos,
@@ -783,14 +796,14 @@ def handle_all_inputs(message):
             user_states[user_id] = f"ADM_ADD_PROD_DESC_{p_id}"
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_prod_menu"))
-            update_admin_panel(ADMIN_ID, f"✅ Link saved!\n\n✍️ **Now send the Product Details / Description text:**", markup)
+            update_admin_panel(ADMIN_ID, f"✅ Link saved!\n\n✍️ **Now send the Product Details / Description text (or type /skip to leave empty):**", markup)
             return
 
         elif state.startswith("ADM_ADD_PROD_DESC_") and message.text:
             p_id = state.replace("ADM_ADD_PROD_DESC_", "")
             prod = next((p for p in DB_STATE["products"] if p["id"] == p_id), None)
             if prod:
-                prod["desc"] = message.text
+                prod["desc"] = "" if message.text.strip() == "/skip" else message.text
                 save_db()
             show_main_admin_menu(ADMIN_ID)
             return
