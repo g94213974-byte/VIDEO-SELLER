@@ -116,9 +116,9 @@ def auto_broadcast_worker():
                     except:
                         pass
             else:
-                time.sleep(5)
+                time.sleep(2)
         except Exception:
-            time.sleep(5)
+            time.sleep(2)
 
 @bot.message_handler(commands=['start', 'admin'])
 def start_command(message):
@@ -170,7 +170,7 @@ def update_admin_panel(chat_id, text, markup):
                 bot.edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode="Markdown")
                 return
             except Exception:
-                pass # Jodi edit na hoy, tahole notun message pathabe nicher line- e
+                pass 
         
         msg = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
         admin_panel_msgs[chat_id] = msg.message_id
@@ -546,7 +546,8 @@ def handle_callbacks(call):
             toggle_text = "🔴 Turn OFF Auto Broadcast" if bc.get("status") else "🟢 Turn ON Auto Broadcast"
             markup.row(InlineKeyboardButton(toggle_text, callback_data="adm_autobc_toggle"))
             markup.row(InlineKeyboardButton("✏️ Set Message & Media", callback_data="adm_autobc_set_msg"))
-            markup.row(InlineKeyboardButton("⏱️ Set Time Interval", callback_data="adm_autobc_set_time"))
+            markup.row(InlineKeyboardButton("⏱️ Set Preset Time", callback_data="adm_autobc_set_time"))
+            markup.row(InlineKeyboardButton("✍️ Set Custom Timer (Seconds/Minutes)", callback_data="adm_autobc_custom_time"))
             markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
 
             preview_txt = bc.get("text", "Not Set")
@@ -556,7 +557,7 @@ def handle_callbacks(call):
             text = (
                 f"⏱️ **Auto Timed Broadcast Settings**\n\n"
                 f"- **Status:** {status_str}\n"
-                f"- **Interval:** {interval_txt}\n"
+                f"- **Interval:** {interval_txt} ({interval_sec} secs)\n"
                 f"- **Message Type:** {bc.get('message_type', 'None')}\n"
                 f"- **Content Preview:** {preview_txt}\n\n"
                 f"Configure your automatic recurring broadcast below:"
@@ -589,7 +590,13 @@ def handle_callbacks(call):
                 InlineKeyboardButton("24 Hours", callback_data="adm_autobc_t_86400")
             )
             markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_autobc_menu"))
-            update_admin_panel(ADMIN_ID, "⏱️ **Select time interval between automatic messages:**", markup)
+            update_admin_panel(ADMIN_ID, "⏱️ **Select preset time interval:**", markup)
+
+        elif data == "adm_autobc_custom_time":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_autobc_menu"))
+            update_admin_panel(ADMIN_ID, "✍️ **Type custom timer duration:**\n\n- Example: type `30` for 30 Seconds\n- Example: type `120` for 2 Minutes\n- Example: type `3600` for 1 Hour\n\nSend time in **Seconds**:", markup)
+            user_states[ADMIN_ID] = "WAITING_AUTOBC_CUSTOM_TIME"
 
         elif data.startswith("adm_autobc_t_"):
             secs = int(data.replace("adm_autobc_t_", ""))
@@ -861,6 +868,23 @@ def handle_all_inputs(message):
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("🔙 Back to Auto BC Menu", callback_data="adm_autobc_menu"))
             update_admin_panel(ADMIN_ID, "✅ **Auto Broadcast Message Saved Successfully!**\n\nNow make sure the status is turned **ON**.", markup)
+            return
+
+        elif state == "WAITING_AUTOBC_CUSTOM_TIME" and message.text:
+            user_states.pop(user_id, None)
+            try:
+                custom_secs = int(message.text.strip())
+                if custom_secs < 1:
+                    custom_secs = 10
+                DB_STATE["auto_bc"]["interval_seconds"] = custom_secs
+                save_db()
+                markup = InlineKeyboardMarkup()
+                markup.row(InlineKeyboardButton("🔙 Back to Auto BC Menu", callback_data="adm_autobc_menu"))
+                update_admin_panel(ADMIN_ID, f"✅ **Custom Timer Set Successfully!**\n\nInterval: `{custom_secs}` Seconds.", markup)
+            except ValueError:
+                markup = InlineKeyboardMarkup()
+                markup.row(InlineKeyboardButton("🔙 Back to Auto BC Menu", callback_data="adm_autobc_menu"))
+                update_admin_panel(ADMIN_ID, "❌ **Invalid number!** Please send only digits (e.g., 30 for 30 seconds).", markup)
             return
 
         elif state == "WAITING_BUYERS_BROADCAST":
