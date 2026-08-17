@@ -28,7 +28,8 @@ DB_STATE = {
     "layout_style": "vertical", 
     "products": [], # Each prod: {id, name, desc, videos, link, position, pay_msg}
     "blocked_users": [],
-    "users": []
+    "users": [],
+    "buyers": [] # List of users who bought something: {user_id, username, product_name, amount_info, date}
 }
 
 # --- TELEGRAM CHANNEL DATABASE LOGIC ---
@@ -40,6 +41,7 @@ def load_db():
             loaded_data = json.loads(chat.pinned_message.text)
             DB_STATE.update(loaded_data)
             if "broadcast_enabled" not in DB_STATE: DB_STATE["broadcast_enabled"] = True
+            if "buyers" not in DB_STATE: DB_STATE["buyers"] = []
             print("✅ Data loaded from Telegram Channel!")
     except Exception as e:
         print(f"⚠️ Saving initial DB: {e}")
@@ -182,6 +184,9 @@ def show_main_admin_menu(chat_id):
     markup.row(InlineKeyboardButton("💳 Global Payment Config", callback_data="adm_pay_config_menu"))
     
     markup.row(InlineKeyboardButton("🚀 Send Custom Broadcast", callback_data="adm_send_custom_bc"))
+    markup.row(InlineKeyboardButton("👑 Special Broadcast to Buyers", callback_data="adm_buyers_bc_menu"))
+    markup.row(InlineKeyboardButton("📦 View Buyers List", callback_data="adm_view_buyers_list"))
+    markup.row(InlineKeyboardButton("💾 Backup & Restore Settings", callback_data="adm_backup_menu"))
     
     bc_mins = DB_STATE.get("broadcast_minutes", 3)
     bc_status = "🟢 ON" if DB_STATE.get("broadcast_enabled", True) else "🔴 OFF"
@@ -203,7 +208,6 @@ def show_main_admin_menu(chat_id):
 # ==========================================
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
-    # ⚡ FIX 1: This makes buttons respond INSTANTLY instead of loading/spinning ⚡
     try:
         bot.answer_callback_query(call.id)
     except:
@@ -243,32 +247,25 @@ def handle_callbacks(call):
         prod_id = data.split("_")[1]
         prod = next((p for p in DB_STATE["products"] if p["id"] == prod_id), None)
         if prod:
+            # Send product videos if available
             p_videos = prod.get("videos", [])
-            if p_videos: send_videos_as_album(user_id, p_videos)
-            caption = f"📌 **{prod['name']}**\n\n{prod.get('desc', 'Product details')}"
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("Buy Now 🛒", callback_data=f"buynow_{prod_id}"))
-            markup.row(InlineKeyboardButton("Back 🔙", callback_data="back_home"))
-            bot.send_message(user_id, caption, reply_markup=markup, parse_mode="Markdown")
-
-    elif data.startswith("buynow_"):
-        prod_id = data.split("_")[1]
-        prod = next((p for p in DB_STATE["products"] if p["id"] == prod_id), None)
-        markup = InlineKeyboardMarkup()
-        markup.row(InlineKeyboardButton("I have paid ✅", callback_data=f"paid_{prod_id}"))
-        markup.row(InlineKeyboardButton("Cancel ❌", callback_data="back_home"))
-
-        if prod and prod.get("pay_msg"):
-            pay_msg = prod["pay_msg"]
-        else:
-            pay_msg = DB_STATE.get("payment_msg", "💳 **Payment Instructions**\n\nPlease scan the QR and pay, then click 'I have paid'.")
+            if p_videos: 
+                send_videos_as_album(user_id, p_videos)
             
-        pay_photo = DB_STATE.get("payment_photo", "")
-        
-        if pay_photo: 
-            bot.send_photo(user_id, pay_photo, caption=pay_msg, reply_markup=markup, parse_mode="Markdown")
-        else: 
-            bot.send_message(user_id, pay_msg, reply_markup=markup, parse_mode="Markdown")
+            caption = f"📌 **{prod['name']}**\n\n{prod.get('desc', 'Product details')}"
+            
+            # Direct payment setup (No extra Buy Now click needed)
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("I have paid ✅", callback_data=f"paid_{prod_id}"))
+            markup.row(InlineKeyboardButton("Back 🔙", callback_data="back_home"))
+
+            pay_msg = prod.get("pay_msg") if prod.get("pay_msg") else DB_STATE.get("payment_msg", "💳 **Payment Instructions**\n\nPlease scan the QR and pay, then click 'I have paid'.")
+            pay_photo = DB_STATE.get("payment_photo", "")
+
+            if pay_photo: 
+                bot.send_photo(user_id, pay_photo, caption=f"{caption}\n\n---\n\n{pay_msg}", reply_markup=markup, parse_mode="Markdown")
+            else: 
+                bot.send_message(user_id, f"{caption}\n\n---\n\n{pay_msg}", reply_markup=markup, parse_mode="Markdown")
 
     elif data.startswith("paid_"):
         prod_id = data.split("_")[1]
@@ -385,7 +382,7 @@ def handle_callbacks(call):
         elif data.startswith("adm_ped_paym_"):
             p_id = data.replace("adm_ped_paym_", "")
             user_states[ADMIN_ID] = f"EDIT_P_PAYM_{p_id}"
-            update_admin_panel(ADMIN_ID, "💳 **Send new Payment Instructions specifically for this button:**\n(Send any text you want user to see when they click Buy Now)", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data=f"adm_p_edit_{p_id}")))
+            update_admin_panel(ADMIN_ID, "💳 **Send new Payment Instructions specifically for this button:**", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data=f"adm_p_edit_{p_id}")))
 
         elif data == "adm_prod_pos_list":
             markup = InlineKeyboardMarkup()
@@ -397,7 +394,7 @@ def handle_callbacks(call):
         elif data.startswith("adm_p_pos_"):
             p_id = data.replace("adm_p_pos_", "")
             user_states[ADMIN_ID] = f"EDIT_P_POS_{p_id}"
-            update_admin_panel(ADMIN_ID, "🔢 Enter the new serial/position number (e.g. 1, 2, 3...):", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data="adm_prod_pos_list")))
+            update_admin_panel(ADMIN_ID, "🔢 Enter the new serial/position number:", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data="adm_prod_pos_list")))
 
         elif data == "adm_prod_add_vid_list":
             markup = InlineKeyboardMarkup()
@@ -488,7 +485,7 @@ def handle_callbacks(call):
             markup.row(InlineKeyboardButton("💳 Set Global Payment QR/Photo", callback_data="adm_set_pay_photo"))
             markup.row(InlineKeyboardButton("✏️ Edit Global Payment Text", callback_data="adm_edit_pay_msg"))
             markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
-            update_admin_panel(ADMIN_ID, "💳 **Global Payment Configuration**\n(This will be used if a button does not have its own specific payment text)", markup)
+            update_admin_panel(ADMIN_ID, "💳 **Global Payment Configuration**", markup)
 
         elif data == "adm_edit_pay_msg":
             markup = InlineKeyboardMarkup()
@@ -523,8 +520,39 @@ def handle_callbacks(call):
         elif data == "adm_send_custom_bc":
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_back_panel"))
-            update_admin_panel(ADMIN_ID, "🚀 **Send the message (Text, Photo, or Video)** that you want to broadcast to all users right now:", markup)
+            update_admin_panel(ADMIN_ID, "🚀 **Send the message (Text, Photo, Video, etc.) for Custom Broadcast:**", markup)
             user_states[ADMIN_ID] = "WAITING_CUSTOM_BROADCAST"
+
+        elif data == "adm_buyers_bc_menu":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_back_panel"))
+            update_admin_panel(ADMIN_ID, "👑 **Send the special message (Text, Photo, Video) for Buyers List only:**", markup)
+            user_states[ADMIN_ID] = "WAITING_BUYERS_BROADCAST"
+
+        elif data == "adm_view_buyers_list":
+            buyers = DB_STATE.get("buyers", [])
+            if not buyers:
+                text = "📦 **Buyers List is Empty.** No one has purchased yet."
+            else:
+                text = "📦 **List of Buyers:**\n\n"
+                for idx, b in enumerate(buyers[-20:], 1): # Show last 20 buyers
+                    text += f"{idx}. Name: {b.get('name')} | User: @{b.get('username')} (ID: `{b.get('user_id')}`)\n   🛍️ Product: {b.get('product')}\n   📅 Date: {b.get('date')}\n\n"
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
+            update_admin_panel(ADMIN_ID, text, markup)
+
+        elif data == "adm_backup_menu":
+            db_json_string = json.dumps(DB_STATE)
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("📥 Restore Setting (Send Code)", callback_data="adm_restore_prompt"))
+            markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
+            update_admin_panel(ADMIN_ID, f"💾 **Bot Backup Code:**\n\nCopy this code and save it somewhere safe. If settings get lost, you can restore using this:\n\n`{db_json_string}`", markup)
+
+        elif data == "adm_restore_prompt":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel", callback_data="adm_backup_menu"))
+            update_admin_panel(ADMIN_ID, "📥 **Send your Backup JSON code here to restore settings:**", markup)
+            user_states[ADMIN_ID] = "WAITING_RESTORE_CODE"
 
         elif data == "adm_set_bc_text":
             markup = InlineKeyboardMarkup()
@@ -535,7 +563,7 @@ def handle_callbacks(call):
         elif data == "adm_set_bc_time":
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_back_panel"))
-            update_admin_panel(ADMIN_ID, "⏱️ **Enter Auto-Broadcast interval in MINUTES** (e.g. 3, 5, 10):", markup)
+            update_admin_panel(ADMIN_ID, "⏱️ **Enter Auto-Broadcast interval in MINUTES:**", markup)
             user_states[ADMIN_ID] = "ADM_SET_BC_TIME"
 
         elif data == "adm_toggle_bc_status":
@@ -571,10 +599,28 @@ def handle_callbacks(call):
                 target_user = int(parts[3])
                 prod = next((p for p in DB_STATE["products"] if p["id"] == prod_id), None)
                 link = prod.get("link", "No link") if prod else "No link"
+                prod_name = prod.get("name", "Product") if prod else "Product"
+                
+                # Add to buyers list
+                import datetime
+                buyer_info = {
+                    "user_id": target_user,
+                    "name": "User",
+                    "username": "unknown",
+                    "product": prod_name,
+                    "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                }
+                DB_STATE["buyers"].append(buyer_info)
+                save_db()
+
                 bot.send_message(target_user, f"✅ **Payment Confirmed!**\n\nLink:\n🔗 {link}", parse_mode="Markdown")
                 
-                try: bot.edit_message_caption(caption=f"{call.message.caption}\n\n✅ **Status:** Confirmed & Link Sent!", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
-                except: pass
+                try: 
+                    bot.edit_message_caption(caption=f"{call.message.caption}\n\n✅ **Status:** Confirmed & Link Sent!", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
+                except:
+                    try:
+                        bot.edit_message_text(f"{call.message.text}\n\n✅ **Status:** Confirmed & Link Sent!", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
+                    except: pass
             except Exception as e:
                 print(f"Error confirm: {e}")
 
@@ -582,8 +628,12 @@ def handle_callbacks(call):
             try:
                 target_user = int(data.split("_")[2])
                 bot.send_message(target_user, "❌ 𝗣𝗮𝘆𝗺𝗲𝗻𝘁 𝗻𝗼𝘁 𝗿𝗲𝗰𝗶𝘃𝗲. 𝗣𝗹𝗲𝗮𝘀𝗲 𝘁𝗿𝘆 𝗮𝗴𝗮𝗶𝗻...")
-                try: bot.edit_message_caption(caption=f"{call.message.caption}\n\n❌ **Status:** Rejected by Admin", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
-                except: pass
+                try: 
+                    bot.edit_message_caption(caption=f"{call.message.caption}\n\n❌ **Status:** Rejected by Admin", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
+                except:
+                    try:
+                        bot.edit_message_text(f"{call.message.text}\n\n❌ **Status:** Rejected by Admin", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
+                    except: pass
             except Exception as e:
                 print(f"Error reject: {e}")
 
@@ -593,8 +643,12 @@ def handle_callbacks(call):
                 if target_user not in DB_STATE["blocked_users"]:
                     DB_STATE["blocked_users"].append(target_user)
                     save_db()
-                try: bot.edit_message_caption(caption=f"{call.message.caption}\n\n🚫 **Status:** User Blocked!", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
-                except: pass
+                try: 
+                    bot.edit_message_caption(caption=f"{call.message.caption}\n\n🚫 **Status:** User Blocked!", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
+                except:
+                    try:
+                        bot.edit_message_text(f"{call.message.text}\n\n🚫 **Status:** User Blocked!", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
+                    except: pass
             except Exception as e:
                 print(f"Error block: {e}")
 
@@ -607,6 +661,21 @@ def handle_all_inputs(message):
 
     if user_id in DB_STATE.get("blocked_users", []):
         return
+
+    # Direct Reply handling for reports sent by users
+    if user_id == ADMIN_ID and message.reply_to_message:
+        replied_msg = message.reply_to_message.text or message.reply_to_message.caption or ""
+        # Try to extract user ID from the replied message text if it contains user ID formatting
+        import re
+        match_id = re.search(r'`(\d+)`', replied_msg)
+        if match_id:
+            target_user_id = int(match_id.group(1))
+            try:
+                bot.copy_message(chat_id=target_user_id, from_chat_id=ADMIN_ID, message_id=message.message_id)
+                bot.reply_to(message, "✅ Reply sent successfully to the user!")
+            except Exception as e:
+                bot.reply_to(message, f"❌ Failed to send reply: {e}")
+            return
 
     state = user_states.get(user_id, "")
 
@@ -705,11 +774,44 @@ def handle_all_inputs(message):
                 try:
                     bot.copy_message(chat_id=u_id, from_chat_id=ADMIN_ID, message_id=message.message_id)
                     success_count += 1
-                except: fail_count += 1
+                except: 
+                    fail_count += 1
             
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
-            update_admin_panel(ADMIN_ID, f"✅ **Broadcast Completed!**\n\n- Successfully sent: {success_count}\n- Failed: {fail_count}", markup)
+            update_admin_panel(ADMIN_ID, f"✅ **Custom Broadcast Completed!**\n\n- Successfully sent: {success_count}\n- Failed: {fail_count}", markup)
+            return
+
+        elif state == "WAITING_BUYERS_BROADCAST":
+            user_states.pop(user_id, None)
+            update_admin_panel(ADMIN_ID, "👑 Broadcasting special message to buyers... Please wait.", None)
+            success_count = 0
+            fail_count = 0
+            sent_users = set()
+            for b in DB_STATE.get("buyers", []):
+                u_id = b.get("user_id")
+                if u_id in sent_users or u_id in DB_STATE.get("blocked_users", []): continue
+                sent_users.add(u_id)
+                try:
+                    bot.copy_message(chat_id=u_id, from_chat_id=ADMIN_ID, message_id=message.message_id)
+                    success_count += 1
+                except:
+                    fail_count += 1
+
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
+            update_admin_panel(ADMIN_ID, f"✅ **Buyers Broadcast Completed!**\n\n- Successfully sent: {success_count}\n- Failed: {fail_count}", markup)
+            return
+
+        elif state == "WAITING_RESTORE_CODE" and message.text:
+            try:
+                restored_data = json.loads(message.text)
+                DB_STATE.update(restored_data)
+                save_db()
+                user_states.pop(user_id, None)
+                update_admin_panel(ADMIN_ID, "✅ **Settings Restored Successfully!**", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel")))
+            except Exception as e:
+                update_admin_panel(ADMIN_ID, f"❌ **Invalid Code/JSON format!** Error: {e}", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data="adm_backup_menu")))
             return
 
         elif state == "ADM_SET_WELCOME" and message.text:
@@ -797,7 +899,9 @@ def handle_all_inputs(message):
     if state == "WAITING_REPORT":
         user_states.pop(user_id, None)
         bot.send_message(user_id, "✅ Your report has been sent to admin.")
-        bot.send_message(ADMIN_ID, f"📩 **Report from @{message.from_user.username} (`{user_id}`):**\n\n{message.text}", parse_mode="Markdown")
+        username = message.from_user.username
+        user_tag = f"@{username}" if username else "No Username"
+        bot.send_message(ADMIN_ID, f"📩 **Report from {user_tag} (`{user_id}`):**\n\n{message.text}\n\n*Tip: Reply directly to this message to answer the user.*", parse_mode="Markdown")
 
     elif state.startswith("WAITING_SCREENSHOT_"):
         prod_id = state.replace("WAITING_SCREENSHOT_", "")
@@ -813,7 +917,6 @@ def handle_all_inputs(message):
                 InlineKeyboardButton("BLOCK 🚫", callback_data=f"adm_block_{user_id}")
             )
             
-            # ⚡ FIX 2: GETTING PRODUCT NAME FOR ADMIN NOTIFICATION ⚡
             prod = next((p for p in DB_STATE.get("products", []) if p["id"] == prod_id), None)
             prod_name = prod["name"] if prod else "Unknown Product"
 
@@ -821,6 +924,7 @@ def handle_all_inputs(message):
             user_tag = f"@{username}" if username else "No Username"
             user_name = message.from_user.first_name or "User"
 
+            # Update buyer name cache if needed
             try:
                 bot.send_photo(
                     ADMIN_ID, 
