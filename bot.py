@@ -210,10 +210,11 @@ def handle_callbacks(call):
             pay_msg = prod.get("pay_msg") if prod.get("pay_msg") else DB_STATE.get("payment_msg", "💳 **Payment Instructions**\n\nPlease scan the QR and pay, then click 'I have paid'.")
             pay_photo = DB_STATE.get("payment_photo", "")
 
+            # Removed the --- line here
             if pay_photo: 
-                bot.send_photo(user_id, pay_photo, caption=f"{caption}\n\n---\n\n{pay_msg}", reply_markup=markup, parse_mode="Markdown")
+                bot.send_photo(user_id, pay_photo, caption=f"{caption}\n\n{pay_msg}", reply_markup=markup, parse_mode="Markdown")
             else: 
-                bot.send_message(user_id, f"{caption}\n\n---\n\n{pay_msg}", reply_markup=markup, parse_mode="Markdown")
+                bot.send_message(user_id, f"{caption}\n\n{pay_msg}", reply_markup=markup, parse_mode="Markdown")
 
     elif data.startswith("paid_"):
         prod_id = data.split("_")[1]
