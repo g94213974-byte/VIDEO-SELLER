@@ -9,7 +9,12 @@ import re
 
 # --- ENVIRONMENT VARIABLES ---
 TOKEN = os.environ.get('BOT_TOKEN')
-ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
+# Ensure ADMIN_ID is clean integer
+try:
+    ADMIN_ID = int(os.environ.get('ADMIN_ID', '0').strip())
+except ValueError:
+    ADMIN_ID = 0
+
 LOG_CHANNEL_ID = int(os.environ.get('LOG_CHANNEL_ID', '0'))
 
 bot = telebot.TeleBot(TOKEN)
@@ -86,7 +91,7 @@ def send_videos_as_album(chat_id, video_list):
 @bot.message_handler(commands=['start', 'admin'])
 def start_command(message):
     user_id = message.chat.id
-    name = message.from_user.first_name
+    name = message.from_user.first_name or "User"
 
     if user_id not in DB_STATE["users"]:
         DB_STATE["users"].append(user_id)
@@ -99,7 +104,8 @@ def start_command(message):
     welcome_text = DB_STATE["welcome_msg"].format(name=name)
     markup = InlineKeyboardMarkup()
 
-    if user_id == ADMIN_ID:
+    # Match User ID strictly as Int
+    if int(user_id) == int(ADMIN_ID):
         markup.row(InlineKeyboardButton("⚙️ Open Admin Panel ⚙️", callback_data="adm_open_panel"))
 
     products = sorted(DB_STATE.get("products", []), key=lambda x: x.get("position", 999))
@@ -126,19 +132,23 @@ def start_command(message):
     bot.send_message(user_id, welcome_text, reply_markup=markup, parse_mode="Markdown")
 
 def update_admin_panel(chat_id, text, markup):
+    """
+    Safely edits the existing admin panel or sends a new message if edit fails.
+    """
+    msg_id = admin_panel_msgs.get(chat_id)
+    if msg_id:
+        try:
+            bot.edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode="Markdown")
+            return
+        except Exception:
+            pass # Message might be deleted or unmodified
+
+    # Fallback to sending a new message if edit fails
     try:
-        msg_id = admin_panel_msgs.get(chat_id)
-        if msg_id:
-            try:
-                bot.edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode="Markdown")
-                return
-            except Exception:
-                pass 
-        
         msg = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
         admin_panel_msgs[chat_id] = msg.message_id
     except Exception as e:
-        print(f"Admin panel error: {e}")
+        print(f"Error displaying admin panel: {e}")
 
 def show_main_admin_menu(chat_id):
     user_states.pop(chat_id, None) 
@@ -166,7 +176,7 @@ def show_main_admin_menu(chat_id):
 
     text = (
         f"🛠️ **Admin Panel (Seller)**\n"
-        f"⌛ **Access:** Owner Access 👑\n"
+        f"👑 **Owner Access Granted**\n"
         f"🔗 **Store Link:**\n{store_link}\n\n"
         f"Choose an option below to manage your bot:"
     )
@@ -174,19 +184,24 @@ def show_main_admin_menu(chat_id):
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
+    # Always acknowledge callback query to prevent button spinning
     try:
         bot.answer_callback_query(call.id)
-    except:
+    except Exception:
         pass
 
     user_id = call.message.chat.id
     data = call.data
     msg_id = call.message.message_id
 
-    if data == "adm_open_panel" and user_id == ADMIN_ID:
-        try: bot.delete_message(user_id, msg_id)
-        except: pass
-        show_main_admin_menu(ADMIN_ID)
+    # FIX: Explicit Integer Match for Admin Open Panel
+    if data == "adm_open_panel":
+        if int(user_id) == int(ADMIN_ID):
+            try: bot.delete_message(user_id, msg_id)
+            except: pass
+            show_main_admin_menu(ADMIN_ID)
+        else:
+            bot.send_message(user_id, "❌ Access Denied! You are not authorized.")
         return
 
     if data == "del_msg":
@@ -198,15 +213,18 @@ def handle_callbacks(call):
         try: bot.delete_message(user_id, msg_id)
         except: pass
         start_command(call.message)
+        return
 
     elif data == "how_to_use":
         vid = DB_STATE.get("how_to_use_video", "")
         if vid: bot.send_video(user_id, vid, caption="🎥 Here is how to use the bot!")
         else: bot.send_message(user_id, "ℹ️ Instructions video not set yet.")
+        return
 
     elif data == "report_issue":
         bot.send_message(user_id, "📝 Please type your issue below. Admin will reply soon:")
         user_states[user_id] = "WAITING_REPORT"
+        return
 
     elif data.startswith("prod_"):
         prod_id = data.split("_")[1]
@@ -232,13 +250,16 @@ def handle_callbacks(call):
                 bot.send_photo(user_id, pay_photo, caption=f"{caption}\n\n{pay_msg}", reply_markup=markup, parse_mode="Markdown")
             else: 
                 bot.send_message(user_id, f"{caption}\n\n{pay_msg}", reply_markup=markup, parse_mode="Markdown")
+        return
 
     elif data.startswith("paid_"):
         prod_id = data.split("_")[1]
         bot.send_message(user_id, "📸 Please send your payment screenshot.")
         user_states[user_id] = f"WAITING_SCREENSHOT_{prod_id}"
+        return
 
-    if user_id == ADMIN_ID:
+    # ADMIN-ONLY CALLBACKS
+    if int(user_id) == int(ADMIN_ID):
         if data == "adm_start_vids_menu":
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("➕ Add Start Videos", callback_data="adm_add_start_vid"))
@@ -601,7 +622,8 @@ def handle_all_inputs(message):
     if user_id in DB_STATE.get("blocked_users", []):
         return
 
-    if user_id == ADMIN_ID and message.reply_to_message:
+    # Direct Reply Handling for Admin
+    if int(user_id) == int(ADMIN_ID) and message.reply_to_message:
         replied_msg = message.reply_to_message.text or message.reply_to_message.caption or ""
         match_id = re.search(r'`(\d+)`', replied_msg)
         if match_id:
@@ -615,7 +637,7 @@ def handle_all_inputs(message):
 
     state = user_states.get(user_id, "")
 
-    if user_id == ADMIN_ID:
+    if int(user_id) == int(ADMIN_ID):
         if state:
             try: bot.delete_message(ADMIN_ID, message.message_id)
             except: pass
@@ -816,7 +838,7 @@ def handle_all_inputs(message):
 
 @app.route('/')
 def home():
-    return "Bot is running on Render!"
+    return "Bot is running!"
 
 def run_bot():
     bot.infinity_polling()
