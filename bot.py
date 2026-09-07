@@ -10,14 +10,13 @@ LOG_CHANNEL_ID = int(os.environ.get('LOG_CHANNEL_ID', '0'))
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# Bot Username dynamically fetch
 BOT_USERNAME = ""
 try:
     BOT_USERNAME = bot.get_me().username
 except Exception:
     pass
 
-# ---------------- TIME PARSER & FORMATTER HELPERS ----------------
+# ---------------- HELPERS ----------------
 def parse_duration(time_str):
     time_str = str(time_str).strip().lower()
     match = re.match(r"^(\d+)([smhd])?$", time_str)
@@ -31,11 +30,9 @@ def parse_duration(time_str):
     return None
 
 def format_time_left(expiry_time):
-    if not expiry_time:
-        return "Unlimited ♾️"
+    if not expiry_time: return "Unlimited ♾️"
     rem = int(expiry_time - time.time())
-    if rem <= 0:
-        return "Expired ❌"
+    if rem <= 0: return "Expired ❌"
     days = rem // 86400
     hours = (rem % 86400) // 3600
     mins = (rem % 3600) // 60
@@ -47,7 +44,6 @@ def format_time_left(expiry_time):
     if secs > 0 and not days and not hours: parts.append(f"{secs}s")
     return " ".join(parts) + " left ⏳"
 
-# Safe delete helper
 def delete_msg_safe(chat_id, msg_id):
     try:
         bot.delete_message(chat_id, msg_id)
@@ -60,14 +56,10 @@ def new_store():
         "welcome_msg": "👋 Hello, {name}!\n\nChoose a plan to get started:",
         "start_videos": [], "how_to_use_video": "", "payment_photo": "",
         "payment_msg": "💳 **Payment Instructions**\n\nPlease scan the QR and pay, then click 'I have paid'.",
-        "reject_msg": "❌ Payment not received. Please try again...",
         "layout_style": "vertical", "products": [], "blocked_users": [],
         "users": [], "buyers": [],
-        "auto_bc": {"status": False, "interval_seconds": 3600,
-                    "message_type": None, "file_id": None, "text": None},
-        "broadcast_perm": False,
-        "expiry_time": None,
-        "seller_name": "Seller"
+        "auto_bc": {"status": False, "interval_seconds": 3600, "message_type": None, "file_id": None, "text": None},
+        "expiry_time": None, "seller_name": "Seller"
     }
 
 def fresh_state():
@@ -75,7 +67,6 @@ def fresh_state():
 
 DB_STATE = fresh_state()
 
-# ---------------- CHANNEL DB (file pin) ----------------
 def save_db():
     try:
         doc = bot.send_document(LOG_CHANNEL_ID, ("bot_backup.json", json.dumps(DB_STATE).encode()))
@@ -98,7 +89,6 @@ def load_db():
 
 load_db()
 
-# ---------------- HELPERS ----------------
 def store_of_key(key):
     return DB_STATE["hub"] if key in ("hub", None) else DB_STATE["sellers"].get(key, new_store())
 
@@ -107,8 +97,7 @@ def key_of_seller_tg(tg):
     for k, s in DB_STATE["sellers"].items():
         if s.get("tg_id") == tg:
             exp = s.get("expiry_time")
-            if exp and now > exp:
-                return None
+            if exp and now > exp: return None
             return k
     return None
 
@@ -125,7 +114,6 @@ def send_videos(chat, vids):
                     try: bot.send_video(chat, v)
                     except Exception: pass
 
-# ---------------- SINGLE-MESSAGE PANEL ENGINE ----------------
 panel = {}
 user_states = {}
 
@@ -166,68 +154,58 @@ def kb(*rows):
     for r in rows: m.row(*r)
     return m
 
-# ---------------- ROUTE RENDERERS ----------------
+# ---------------- RENDER PANELS ----------------
 def render(uid):
     ctx = user_states.get(uid, {})
     route = top(uid)
     key = ctx.get("key", "hub")
+    st = store_of_key(key)
 
-    # ADMIN PANEL
-    if route == "admin" or route == "seller":
-        store = store_of_key(key)
-        lp = "↔️ Horizontal" if store.get("layout_style") == "horizontal" else "↕️ Vertical"
-        
-        time_status = format_time_left(store.get("expiry_time")) if key != "hub" else "Owner Access 👑"
-        sname = store.get("seller_name", "Seller")
-        
-        # Build Product Link for Admin
+    if route in ("admin", "seller"):
+        lp = "↔️ Horizontal" if st.get("layout_style") == "horizontal" else "↕️ Vertical"
+        time_status = format_time_left(st.get("expiry_time")) if key != "hub" else "Owner Access 👑"
+        sname = st.get("seller_name", "Seller")
         prod_link = f"https://t.me/{BOT_USERNAME}?start={key}" if key != "hub" else f"https://t.me/{BOT_USERNAME}"
-        
+
         rows = [
-            [InlineKeyboardButton("🛍️ Product Button Management", callback_data="SUB_products")],
-            [InlineKeyboardButton("📐 Layout: " + lp, callback_data="ACT_togglelayout")],
-            [InlineKeyboardButton("📦 Buyers List", callback_data="GO_bl")],
-            [InlineKeyboardButton("🎞️ Start Videos", callback_data="SUB_startvids")],
-            [InlineKeyboardButton("📝 Welcome Text", callback_data="SUB_welcome")],
-            [InlineKeyboardButton("🎥 How-To-Use Video", callback_data="SUB_howvid")],
-            [InlineKeyboardButton("💳 Payment Config", callback_data="SUB_pay")],
-            [InlineKeyboardButton("💾 Backup & Restore Store", callback_data="GO_bk")]
+            [InlineKeyboardButton("🔗 Get My Store Link", callback_data="ACT_getlink")],
+            [InlineKeyboardButton("🛍️ Manage Product Buttons", callback_data="SUB_products")],
+            [InlineKeyboardButton("📐 Change Layout: " + lp, callback_data="ACT_togglelayout")],
+            [InlineKeyboardButton("🎞️ Manage Start Videos", callback_data="SUB_startvids")],
+            [InlineKeyboardButton("📝 Edit Welcome Text", callback_data="SUB_welcome")],
+            [InlineKeyboardButton("🎥 Set 'How To Use' Video", callback_data="SUB_howvid")],
+            [InlineKeyboardButton("💳 Global Payment Config", callback_data="SUB_pay")],
+            [InlineKeyboardButton("📦 View Buyers List", callback_data="GO_bl")],
+            [InlineKeyboardButton("💾 Backup & Restore Settings", callback_data="GO_bk")]
         ]
         if uid == OWNER_ID:
-            rows.append([InlineKeyboardButton("👑 Switch to Owner Panel", callback_data="GO_owner")])
-            
-        header = f"🛠️ **Admin Panel** ({sname})\n"
-        header += f"⌛ **Time Remaining:** `{time_status}`\n"
-        header += f"🔗 **Your Bot Store Link:**\n`{prod_link}`"
-        
+            rows.insert(0, [InlineKeyboardButton("👑 Switch to Owner Panel", callback_data="GO_owner")])
+
+        header = f"🛠️ **Admin Panel** ({sname})\n⌛ Time: `{time_status}`\n🔗 Store Link:\n`{prod_link}`"
         edit_panel(uid, header, kb(*rows))
         return
 
-    # OWNER PANEL
     if route == "owner":
         rows = [
-            [InlineKeyboardButton("👥 Manage Sellers", callback_data="GO_sellers")],
-            [InlineKeyboardButton("🚀 Custom BC", callback_data="SUB_cb")],
-            [InlineKeyboardButton("⏱️ Auto BC", callback_data="SUB_ab")],
-            [InlineKeyboardButton("👑 BC to Buyers", callback_data="SUB_bb")],
-            [InlineKeyboardButton("💰 All Sales", callback_data="GO_sales")],
-            [InlineKeyboardButton("📣 Send BC to Seller Users", callback_data="GO_ownbc")],
-            [InlineKeyboardButton("⚙️ Single Seller Backup/Restore", callback_data="GO_single_bk")],
+            [InlineKeyboardButton("👥 Manage Admins (Owner)", callback_data="GO_sellers")],
+            [InlineKeyboardButton("🚀 Send Custom Broadcast", callback_data="SUB_cb")],
+            [InlineKeyboardButton("⏱️ Auto Timed Broadcast", callback_data="SUB_ab")],
+            [InlineKeyboardButton("👑 Special Broadcast to Buyers", callback_data="SUB_bb")],
+            [InlineKeyboardButton("💰 View All Sales", callback_data="GO_sales")],
             [InlineKeyboardButton("💾 Backup & Restore", callback_data="GO_bk")],
             [InlineKeyboardButton("🛠️ Switch to Admin Panel", callback_data="GO_admin")]
         ]
-        edit_panel(uid, "👑 **OWNER PANEL**", kb(*rows))
+        edit_panel(uid, "👑 **Owner Panel**", kb(*rows))
         return
 
-    # MANAGE SELLERS
     if route == "sellers":
         s = "👥 **Sellers Management**\n\n"
-        for k, st in DB_STATE["sellers"].items():
-            name = st.get('seller_name', 'Seller')
-            rem = format_time_left(st.get('expiry_time'))
+        for k, st_item in DB_STATE["sellers"].items():
+            name = st_item.get('seller_name', 'Seller')
+            rem = format_time_left(st_item.get('expiry_time'))
             s += f"👤 **{name}** (`{k}`) | Time: `{rem}`\n"
         if not DB_STATE["sellers"]: s += "(No seller added yet)\n"
-        
+
         edit_panel(uid, s, kb(
             [InlineKeyboardButton("➕ Add Seller", callback_data="W_addseller")],
             [InlineKeyboardButton("❌ Delete Seller", callback_data="GO_del_seller_menu")],
@@ -235,72 +213,84 @@ def render(uid):
             [BACK(uid)]))
         return
 
-    # DELETE SELLER MENU
     if route == "del_seller_menu":
         if not DB_STATE["sellers"]:
             edit_panel(uid, "❌ No seller to delete.", kb([BACK(uid)]))
             return
-        rows = []
-        for k, st in DB_STATE["sellers"].items():
-            sname = st.get("seller_name", f"Seller {k}")
-            rows.append([InlineKeyboardButton(f"🗑️ Delete {sname}", callback_data=f"ACT_delseller_{k}")])
+        rows = [[InlineKeyboardButton(f"🗑️ Delete {st_item.get('seller_name', k)}", callback_data=f"ACT_delseller_{k}")] for k, st_item in DB_STATE["sellers"].items()]
         rows.append([BACK(uid)])
-        edit_panel(uid, "🗑️ Select a seller button below to delete:", kb(*rows))
+        edit_panel(uid, "🗑️ Select a seller to delete:", kb(*rows))
         return
 
-    if route == "single_bk":
-        edit_panel(uid, "⚙️ **Single Seller / Specific Setting Backup & Restore**", kb(
-            [InlineKeyboardButton("📤 Export Seller Backup", callback_data="W_expseller")],
-            [InlineKeyboardButton("📥 Import Seller Backup", callback_data="W_impseller")],
-            [BACK(uid)]))
+    if route == "products":
+        s = f"🛍️ **Product Button Management:**\n\n"
+        s += "📌 **Add Product Method:**\n1. Send or Forward Video.\n2. Send Text: `Product Name https://link.com`\n\n"
+        s += "📌 **Delete Product:** Select 'Delete Button' below or send `DEL_id`"
+
+        rows = [
+            [InlineKeyboardButton("❇️ Add New Button", callback_data="W_addbutton")],
+            [InlineKeyboardButton("✏️ Edit Details / Link", callback_data="GO_edit_prod_list")],
+            [InlineKeyboardButton("🔢 Change Position", callback_data="W_posbutton")],
+            [InlineKeyboardButton("🎥 Add Videos", callback_data="W_addvidprod")],
+            [InlineKeyboardButton("⚙️ Manage Videos", callback_data="GO_manvid_list")],
+            [InlineKeyboardButton("🗑️ Delete Button", callback_data="GO_delbutton_list")],
+            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="NAV_BACK")]
+        ]
+        edit_panel(uid, s, kb(*rows))
         return
 
-    if route == "sales":
-        s = "💰 **Sales**\n"
-        tot = 0
-        def ln(nm, st):
-            nonlocal tot
-            c = len(st.get("buyers", [])); tot += c
-            return f"• {nm}: {c}\n"
-        s += ln("HUB Owner", DB_STATE["hub"])
-        for k, st in DB_STATE["sellers"].items(): 
-            s += ln(st.get("seller_name", k), st)
-        s += f"\n**Total Sales: {tot}**"
-        edit_panel(uid, s, kb([BACK(uid)]))
+    if route == "edit_prod_list":
+        rows = [[InlineKeyboardButton(f"✏️ {p['name']}", callback_data=f"ACT_editp_{p['id']}")] for p in st.get("products", [])]
+        rows.append([BACK(uid)])
+        edit_panel(uid, "Select button to edit:", kb(*rows))
         return
 
-    if route == "ownbc":
-        s = "📣 Broadcast to seller's users:\n"
-        for k, st in DB_STATE["sellers"].items():
-            sname = st.get('seller_name', k)
-            s += f"`bct_{k}` → **{sname}** ({len(st.get('users', []))} users)\n"
-        s += "\nSend format: `bct_s1` then message."
-        edit_panel(uid, s, kb([BACK(uid)]))
+    if route.startswith("edit_prod_item_"):
+        pid = route.replace("edit_prod_item_", "")
+        p = next((x for x in st.get("products", []) if str(x["id"]) == str(pid)), None)
+        if not p:
+            edit_panel(uid, "❌ Product not found.", kb([BACK(uid)])); return
+        txt = f"Editing ✏️ **{p['name']}**\nLink: `{p.get('link','')}`"
+        rows = [
+            [InlineKeyboardButton("✏️ Name", callback_data=f"W_editname_{pid}"), InlineKeyboardButton("🔗 Link", callback_data=f"W_editlink_{pid}")],
+            [BACK(uid)]
+        ]
+        edit_panel(uid, txt, kb(*rows))
         return
 
-    if route == "bk":
-        edit_panel(uid, "💾 **Backup & Restore**", kb(
-            [InlineKeyboardButton("⬇️ Download Backup File", callback_data="ACT_getbk")],
-            [InlineKeyboardButton("📥 Restore Database", callback_data="W_restore")],
-            [BACK(uid)]))
+    if route == "manvid_list":
+        rows = [[InlineKeyboardButton(f"⚙️ ({len(p.get('videos',[]))}) {p['name']}", callback_data=f"ACT_manv_{p['id']}")] for p in st.get("products", [])]
+        rows.append([BACK(uid)])
+        edit_panel(uid, "Manage videos of:", kb(*rows))
         return
 
-    if route == "bl":
-        st = store_of_key(key)
-        if not st.get("buyers"):
-            edit_panel(uid, "📦 No buyers found.", kb([BACK(uid)])); return
-        sname = st.get("seller_name", key)
-        s = f"📦 **Buyers List** ({sname})\n\n"
-        for b in st["buyers"][-15:]:
-            s += f"• {b.get('product')} | `{b.get('user_id')}` | {b.get('date')}\n"
-        edit_panel(uid, s, kb([BACK(uid)]))
+    if route.startswith("manvid_item_"):
+        pid = route.replace("manvid_item_", "")
+        p = next((x for x in st.get("products", []) if str(x["id"]) == str(pid)), None)
+        if not p: edit_panel(uid, "❌ Product not found.", kb([BACK(uid)])); return
+        vids = p.get("videos", [])
+        rows = []
+        for idx, _ in enumerate(vids):
+            rows.append([
+                InlineKeyboardButton(f"👀 {idx+1}", callback_data=f"ACT_viewv_{pid}_{idx}"),
+                InlineKeyboardButton(f"🗑️ {idx+1}", callback_data=f"ACT_delv_{pid}_{idx}")
+            ])
+        rows.append([InlineKeyboardButton("💥 Delete All", callback_data=f"ACT_delallv_{pid}")])
+        rows.append([BACK(uid)])
+        edit_panel(uid, f"Videos of **{p['name']}** ({len(vids)} total):", kb(*rows))
+        return
+
+    if route == "delbutton_list":
+        rows = [[InlineKeyboardButton(f"🗑️ {p['name']}", callback_data=f"ACT_delp_{p['id']}")] for p in st.get("products", [])]
+        rows.append([BACK(uid)])
+        edit_panel(uid, "Delete which button?", kb(*rows))
         return
 
     if route.startswith("SUB_"):
         sub = route[4:]
         if sub == "startvids":
             user_states[uid]["wait"] = "startvids"
-            edit_panel(uid, f"📥 Send videos. Type `/done` when finished.\nTotal: {len(store_of_key(key)['start_videos'])}", kb([BACK(uid)]))
+            edit_panel(uid, f"📥 Send videos. Type `/done` when finished.\nTotal: {len(st.get('start_videos', []))}", kb([BACK(uid)]))
         elif sub == "welcome":
             user_states[uid]["wait"] = "welcome"
             edit_panel(uid, "📝 Send new Welcome text. You can use `{name}` placeholder.", kb([BACK(uid)]))
@@ -308,45 +298,40 @@ def render(uid):
             user_states[uid]["wait"] = "howvid"
             edit_panel(uid, "🎥 Send 'How To Use' video.", kb([BACK(uid)]))
         elif sub == "pay":
-            edit_panel(uid, "💳 **Payment Config**", kb(
+            edit_panel(uid, "💳 **Global Payment Config**", kb(
                 [InlineKeyboardButton("🖼️ Set QR Photo", callback_data="W_payphoto")],
                 [InlineKeyboardButton("✏️ Set Payment Text", callback_data="W_paytext")],
                 [BACK(uid)]))
         elif sub == "cb":
             user_states[uid]["wait"] = "cb"
-            edit_panel(uid, "🚀 Send broadcast message (text/photo/video).", kb([BACK(uid)]))
+            edit_panel(uid, "🚀 Send custom broadcast message.", kb([BACK(uid)]))
         elif sub == "ab":
             user_states[uid]["wait"] = "ab_msg"
-            edit_panel(uid, "⏱️ Send Auto-BC message.", kb([BACK(uid)]))
+            edit_panel(uid, "⏱️ Send Auto Timed Broadcast message.", kb([BACK(uid)]))
         elif sub == "bb":
             user_states[uid]["wait"] = "bb"
-            edit_panel(uid, "👑 Send broadcast to buyers.", kb([BACK(uid)]))
-        elif sub == "products":
-            st = store_of_key(key)
-            sname = st.get("seller_name", key)
-            
-            s = f"🛍️ **Product Button Management ({sname})**\n\n"
-            s += "📌 **Add Product Method:**\n"
-            s += "1. Send or Forward Video.\n"
-            s += "2. Send Text: `Product Name https://link.com`\n\n"
-            s += "📌 **Delete Product:** Click 'Delete Button' below or send `DEL_id`"
-            
-            # Buttons matching user screenshot (excluding Edit Details / Link)
-            rows = [
-                [InlineKeyboardButton("❇️ Add New Button", callback_data="W_addbutton")],
-                [InlineKeyboardButton("🔢 Change Position", callback_data="W_posbutton")],
-                [InlineKeyboardButton("🎥 Add Videos", callback_data="W_addvidprod")],
-                [InlineKeyboardButton("⚙️ Manage Videos", callback_data="W_manvidprod")],
-                [InlineKeyboardButton("🗑️ Delete Button", callback_data="W_delbutton")],
-                [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="NAV_BACK")]
-            ]
-            edit_panel(uid, s, kb(*rows))
-            user_states[uid]["wait"] = "prodcmd"
+            edit_panel(uid, "👑 Send special broadcast to buyers.", kb([BACK(uid)]))
+        return
+
+    if route == "bk":
+        edit_panel(uid, "💾 **Backup & Restore**", kb(
+            [InlineKeyboardButton("⬇️ Download Backup File", callback_data="ACT_getbk")],
+            [InlineKeyboardButton("📥 Restore Settings", callback_data="W_restore")],
+            [BACK(uid)]))
+        return
+
+    if route == "bl":
+        if not st.get("buyers"):
+            edit_panel(uid, "📦 No buyers found.", kb([BACK(uid)])); return
+        s = f"📦 **Buyers List** ({st.get('seller_name', key)})\n\n"
+        for b in st["buyers"][-15:]:
+            s += f"• {b.get('product')} | `{b.get('user_id')}` | {b.get('date')}\n"
+        edit_panel(uid, s, kb([BACK(uid)]))
         return
 
     edit_panel(uid, "Menu", kb([BACK(uid)]))
 
-# ---------------- CALLBACKS ----------------
+# ---------------- CALLBACK HANDLER ----------------
 @bot.callback_query_handler(func=lambda c: True)
 def cb(c):
     try: bot.answer_callback_query(c.id)
@@ -356,14 +341,12 @@ def cb(c):
     ctx = user_states.setdefault(uid, {})
     ctx.setdefault("nav", [])
     key = ctx.get("key", "hub")
+    st = store_of_key(key)
 
-    # USER ACTION HANDLERS (Product & How to use button fix)
-    if d.startswith("home_") or d == "HOME":
-        st = store_of_key(key)
-        send_menu(uid, st, (c.message.from_user.first_name or "User")); return
-    
+    if d == "HOME":
+        send_menu(uid, st, (c.from_user.first_name or "User")); return
+
     if d == "HOW":
-        st = store_of_key(key)
         v = st.get("how_to_use_video")
         if v: bot.send_video(uid, v)
         else: bot.send_message(uid, "ℹ️ 'How to use' video not set.")
@@ -376,16 +359,14 @@ def cb(c):
 
     if d.startswith("BUY_"):
         pid = d.split("_")[1]
-        st = store_of_key(key)
         p = next((x for x in st.get("products", []) if str(x["id"]) == str(pid)), None)
         if not p:
             bot.send_message(uid, "❌ Product not found.")
             return
-        if p.get("videos"): 
-            send_videos(uid, p["videos"])
-        cap = "📌 **" + p["name"] + "**"
-        pay = p.get("pay_msg") or st["payment_msg"]
-        mk = kb([InlineKeyboardButton("I have paid ✅", callback_data="PAID_" + str(pid))],
+        if p.get("videos"): send_videos(uid, p["videos"])
+        cap = f"📌 **{p['name']}**"
+        pay = p.get("pay_msg") or st.get("payment_msg", "")
+        mk = kb([InlineKeyboardButton("I have paid ✅", callback_data=f"PAID_{pid}")],
                 [InlineKeyboardButton("Back 🔙", callback_data="HOME")])
         if st.get("payment_photo"):
             bot.send_photo(uid, st["payment_photo"], caption=cap + "\n\n" + pay, reply_markup=mk, parse_mode="Markdown")
@@ -398,18 +379,16 @@ def cb(c):
         bot.send_message(uid, "📸 Send payment screenshot.")
         return
 
-    if d == "none": return
-
-    # Panel Navigation Switches
+    # PANEL NAVIGATION
     if d == "GO_owner": push(uid, "owner"); render(uid); return
     if d == "GO_admin": push(uid, "admin"); render(uid); return
     if d == "GO_sellers": push(uid, "sellers"); render(uid); return
     if d == "GO_del_seller_menu": push(uid, "del_seller_menu"); render(uid); return
-    if d == "GO_single_bk": push(uid, "single_bk"); render(uid); return
-    if d == "GO_sales": push(uid, "sales"); render(uid); return
-    if d == "GO_ownbc": push(uid, "ownbc"); render(uid); return
     if d == "GO_bk": push(uid, "bk"); render(uid); return
     if d == "GO_bl": push(uid, "bl"); render(uid); return
+    if d == "GO_edit_prod_list": push(uid, "edit_prod_list"); render(uid); return
+    if d == "GO_manvid_list": push(uid, "manvid_list"); render(uid); return
+    if d == "GO_delbutton_list": push(uid, "delbutton_list"); render(uid); return
 
     if d.startswith("SUB_"):
         push(uid, d); render(uid); return
@@ -417,71 +396,83 @@ def cb(c):
     if d == "NAV_BACK":
         if not ctx["nav"]:
             push(uid, "admin")
-            render(uid)
         else:
             back(uid)
-            render(uid)
-        return
-
-    if d.startswith("W_"):
-        ctx["wait"] = d[2:].lower()
-        if ctx["wait"] == "addbutton":
-            edit_panel(uid, "❇️ Send details to add button:\nFormat: `Product Name https://link.com`", kb([BACK(uid)]))
-        elif ctx["wait"] == "posbutton":
-            edit_panel(uid, "🔢 Send product position format:\n`ID NewPosition` (e.g., `1 2`)", kb([BACK(uid)]))
-        elif ctx["wait"] == "addvidprod":
-            edit_panel(uid, "🎥 Send or Forward a Video now.", kb([BACK(uid)]))
-        elif ctx["wait"] == "manvidprod":
-            st = store_of_key(key)
-            txt = "⚙️ **Product Videos Count:**\n\n"
-            for p in st.get("products", []):
-                txt += f"• ID `{p['id']}` ({p['name']}): {len(p.get('videos', []))} vids\n"
-            edit_panel(uid, txt, kb([BACK(uid)]))
-        elif ctx["wait"] == "delbutton":
-            st = store_of_key(key)
-            txt = "🗑️ **Delete Button:**\nSend `DEL_id` (e.g. `DEL_1`)\n\n"
-            for p in st.get("products", []):
-                txt += f"🆔 `{p['id']}` - {p['name']}\n"
-            edit_panel(uid, txt, kb([BACK(uid)]))
-        elif ctx["wait"] == "addseller":
-            edit_panel(uid, "Format: Send Telegram ID & Time\nExample: `123456789 1d` or `123456789 12h`", kb([BACK(uid)]))
-        elif ctx["wait"] == "settime":
-            edit_panel(uid, "Format: `s1 2d` or `s1 +1d`", kb([BACK(uid)]))
-        elif ctx["wait"] == "expseller":
-            edit_panel(uid, "Seller ID type (e.g. `s1`):", kb([BACK(uid)]))
-        elif ctx["wait"] == "impseller":
-            edit_panel(uid, "Send Seller JSON Data:", kb([BACK(uid)]))
-        elif ctx["wait"] == "payphoto":
-            edit_panel(uid, "Send QR Photo.", kb([BACK(uid)]))
-        elif ctx["wait"] == "paytext":
-            edit_panel(uid, "Send Payment Text.", kb([BACK(uid)]))
-        elif ctx["wait"] == "restore":
-            edit_panel(uid, "📥 Upload `.json` File or Backup Code.", kb([BACK(uid)]))
+        render(uid)
         return
 
     if d.startswith("ACT_"):
         act = d[4:]
-        if act == "togglelayout":
-            st = store_of_key(key)
+        if act == "getlink":
+            lnk = f"https://t.me/{BOT_USERNAME}?start={key}" if key != "hub" else f"https://t.me/{BOT_USERNAME}"
+            bot.send_message(uid, f"🔗 **Your Store Link:**\n`{lnk}`", parse_mode="Markdown")
+        elif act == "togglelayout":
             st["layout_style"] = "vertical" if st.get("layout_style") != "vertical" else "horizontal"
             save_db(); render(uid)
+        elif act.startswith("editp_"):
+            pid = act.replace("editp_", "")
+            push(uid, f"edit_prod_item_{pid}"); render(uid)
+        elif act.startswith("manv_"):
+            pid = act.replace("manv_", "")
+            push(uid, f"manvid_item_{pid}"); render(uid)
+        elif act.startswith("viewv_"):
+            _, pid, idx = act.split("_")
+            p = next((x for x in st.get("products", []) if str(x["id"]) == str(pid)), None)
+            if p and len(p.get("videos", [])) > int(idx):
+                bot.send_video(uid, p["videos"][int(idx)])
+        elif act.startswith("delv_"):
+            _, pid, idx = act.split("_")
+            p = next((x for x in st.get("products", []) if str(x["id"]) == str(pid)), None)
+            if p and len(p.get("videos", [])) > int(idx):
+                p["videos"].pop(int(idx)); save_db(); render(uid)
+        elif act.startswith("delallv_"):
+            pid = act.replace("delallv_", "")
+            p = next((x for x in st.get("products", []) if str(x["id"]) == str(pid)), None)
+            if p:
+                p["videos"] = []; save_db(); render(uid)
+        elif act.startswith("delp_"):
+            pid = act.replace("delp_", "")
+            st["products"] = [x for x in st.get("products", []) if str(x["id"]) != str(pid)]
+            save_db(); back(uid); render(uid)
         elif act.startswith("delseller_"):
-            sid = act.split("_", 1)[1]
+            sid = act.replace("delseller_", "")
             if sid in DB_STATE["sellers"]:
-                sname = DB_STATE["sellers"][sid].get("seller_name", sid)
-                del DB_STATE["sellers"][sid]
-                save_db()
-                bot.send_message(uid, f"✅ Seller **{sname}** deleted successfully!")
-            back(uid)
-            render(uid)
+                del DB_STATE["sellers"][sid]; save_db()
+            back(uid); render(uid)
         elif act == "getbk":
             bot.send_document(uid, ("bot_backup.json", json.dumps(DB_STATE, indent=2).encode()))
-            edit_panel(uid, "✅ Full Backup file sent.", kb(
-                [InlineKeyboardButton("📥 Restore Now", callback_data="W_restore")],
-                [BACK(uid)]))
         return
 
-# ---------------- MAIN USER MENU ----------------
+    if d.startswith("W_"):
+        w = d[2:]
+        if w == "addbutton":
+            ctx["wait"] = "addbutton"
+            edit_panel(uid, "❇️ Enter new Button Name & Link:\nFormat: `Product Name https://link.com`", kb([BACK(uid)]))
+        elif w == "posbutton":
+            ctx["wait"] = "posbutton"
+            edit_panel(uid, "🔢 Type position:\nFormat: `ID Position` (e.g., `1 2`)", kb([BACK(uid)]))
+        elif w == "addvidprod":
+            ctx["wait"] = "addvidprod"
+            edit_panel(uid, "🎥 Send or Forward Video now.", kb([BACK(uid)]))
+        elif w.startswith("editname_"):
+            pid = w.replace("editname_", "")
+            ctx["wait"] = f"editname_{pid}"
+            edit_panel(uid, "✏️ Enter new name:", kb([BACK(uid)]))
+        elif w.startswith("editlink_"):
+            pid = w.replace("editlink_", "")
+            ctx["wait"] = f"editlink_{pid}"
+            edit_panel(uid, "🔗 Enter new link:", kb([BACK(uid)]))
+        elif w == "addseller":
+            ctx["wait"] = "addseller"
+            edit_panel(uid, "Format: `123456789 1d`", kb([BACK(uid)]))
+        elif w == "settime":
+            ctx["wait"] = "settime"
+            edit_panel(uid, "Format: `s1 2d` or `s1 +1d`", kb([BACK(uid)]))
+        elif w in ("payphoto", "paytext", "restore"):
+            ctx["wait"] = w
+            edit_panel(uid, f"Send input for {w}:", kb([BACK(uid)]))
+
+# ---------------- USER MENU RENDER ----------------
 def send_menu(uid, store, name):
     if store.get("start_videos"): send_videos(uid, store["start_videos"])
     welcome = store.get("welcome_msg", "{name}").format(name=name)
@@ -490,18 +481,17 @@ def send_menu(uid, store, name):
     if store.get("layout_style") == "horizontal":
         row = []
         for p in prods:
-            row.append(InlineKeyboardButton(p["name"], callback_data="BUY_" + str(p["id"])))
+            row.append(InlineKeyboardButton(p["name"], callback_data=f"BUY_{p['id']}"))
             if len(row) == 2: mk.row(*row); row = []
         if row: mk.row(*row)
     else:
-        for p in prods: mk.row(InlineKeyboardButton(p["name"], callback_data="BUY_" + str(p["id"])))
-    
+        for p in prods: mk.row(InlineKeyboardButton(p["name"], callback_data=f"BUY_{p['id']}"))
+
     mk.row(InlineKeyboardButton("How to use ❓", callback_data="HOW"),
            InlineKeyboardButton("Report 📩", callback_data="REP"))
     try: bot.send_message(uid, welcome, reply_markup=mk, parse_mode="Markdown")
     except Exception: pass
 
-# /start Command Handler
 @bot.message_handler(commands=['start'])
 def start_cmd(m):
     uid = m.chat.id; name = m.from_user.first_name or "User"
@@ -510,7 +500,6 @@ def start_cmd(m):
     payload = payload.split("?")[0].replace("/start", "").strip()
     ctx = user_states.setdefault(uid, {})
 
-    # OWNER Fast Admin Open
     if uid == OWNER_ID:
         ctx.clear(); ctx["mode"] = "owner"; ctx["key"] = "hub"; ctx["nav"] = ["admin"]
         render(uid); return
@@ -535,36 +524,7 @@ def start_cmd(m):
     if uid not in h["users"]: h["users"].append(uid); save_db()
     send_menu(uid, h, name)
 
-# Payment confirmation buttons
-@bot.callback_query_handler(func=lambda c: c.data.startswith(("adm_confirm_", "adm_reject_", "adm_block_")))
-def confirm_cb(c):
-    try: bot.answer_callback_query(c.id)
-    except Exception: pass
-    uid = c.message.chat.id; d = c.data
-    try:
-        if d.startswith("adm_confirm_"):
-            parts = d.split("_")
-            key, pid, tu = parts[2], parts[3], int(parts[4])
-            st = store_of_key(key)
-            p = next((x for x in st["products"] if str(x["id"]) == str(pid)), None)
-            link = p["link"] if p else "No link"
-            nm = p["name"] if p else "Product"
-            st["buyers"].append({"user_id": tu, "name": "User", "username": "?", "product": nm,
-                                 "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")})
-            save_db()
-            bot.send_message(tu, "✅ **Payment Confirmed!**\n\n🔗 " + link, parse_mode="Markdown")
-        elif d.startswith("adm_reject_"):
-            tu = int(d.split("_")[2]); bot.send_message(tu, "❌ Payment not received. Please try again...")
-        elif d.startswith("adm_block_"):
-            tu = int(d.split("_")[2])
-            k = key_of_seller_tg(uid) or "hub"
-            st = store_of_key(k)
-            if tu not in st["blocked_users"]: st["blocked_users"].append(tu); save_db()
-    except Exception as e: print("confirm err", e)
-    try: bot.delete_message(uid, c.message.message_id)
-    except Exception: pass
-
-# ---------------- TEXT / MEDIA / COMMAND INPUT ----------------
+# ---------------- INPUT MESSAGES & AUTO-DELETE ----------------
 @bot.message_handler(func=lambda m: True, content_types=['text','photo','video','document'])
 def inp(m):
     uid = m.chat.id
@@ -576,9 +536,8 @@ def inp(m):
 
     if txt in ("/done", "/cancel"):
         ctx.pop("wait", None)
-        bot.send_message(uid, "✅ Cancelled / Completed.")
         delete_msg_safe(uid, m.message_id)
-        return
+        render(uid); return
 
     if wait == "report":
         ctx.pop("wait", None)
@@ -586,156 +545,82 @@ def inp(m):
         if key != "hub":
             s = DB_STATE["sellers"].get(key)
             dest = (s or {}).get("tg_id") or OWNER_ID
-        tag = "@" + m.from_user.username if m.from_user.username else "NoUser"
-        bot.send_message(dest, f"📩 Report from {tag} (`{uid}`):\n\n{txt}", parse_mode="Markdown")
+        bot.send_message(dest, f"📩 Report from `{uid}`:\n\n{txt}", parse_mode="Markdown")
         bot.send_message(uid, "✅ Report sent successfully.")
         return
 
     if wait == "shot" and m.content_type == "photo":
         ctx.pop("wait", None)
         pid = ctx.get("pid")
-        p = next((x for x in st["products"] if str(x["id"]) == str(pid)), None)
+        p = next((x for x in st.get("products", []) if str(x["id"]) == str(pid)), None)
         nm = p["name"] if p else "Product"
-        if key == "hub":
-            adm = OWNER_ID; label = "Owner Hub"
-            mk = kb([InlineKeyboardButton("CONFIRM ✅", callback_data=f"adm_confirm_hub_{pid}_{uid}"),
-                     InlineKeyboardButton("REJECT ❌", callback_data=f"adm_reject_{uid}"),
-                     InlineKeyboardButton("BLOCK 🚫", callback_data=f"adm_block_{uid}")])
-        else:
-            s = DB_STATE["sellers"].get(key, {})
-            adm = s.get("tg_id") or OWNER_ID; label = s.get("seller_name", key)
-            mk = kb([InlineKeyboardButton("CONFIRM ✅", callback_data=f"adm_confirm_{key}_{pid}_{uid}"),
-                     InlineKeyboardButton("REJECT ❌", callback_data=f"adm_reject_{uid}"),
-                     InlineKeyboardButton("BLOCK 🚫", callback_data=f"adm_block_{uid}")])
-        tag = "@" + m.from_user.username if m.from_user.username else "NoUser"
-        bot.send_message(uid, "⏳ Checking payment... Please wait 5-10 minutes.")
-        try:
-            bot.send_photo(adm, m.photo[-1].file_id,
-                caption=f"📸 **New Payment!**\nStore: {label}\nProduct: {nm}\nUser: {tag}\nID: `{uid}`",
-                reply_markup=mk, parse_mode="Markdown")
-        except Exception as e: print("shot err", e)
+        adm = OWNER_ID if key == "hub" else (DB_STATE["sellers"].get(key, {}).get("tg_id") or OWNER_ID)
+        mk = kb([InlineKeyboardButton("CONFIRM ✅", callback_data=f"adm_confirm_{key}_{pid}_{uid}"),
+                 InlineKeyboardButton("REJECT ❌", callback_data=f"adm_reject_{uid}")])
+        bot.send_message(uid, "⏳ Checking payment...")
+        try: bot.send_photo(adm, m.photo[-1].file_id, caption=f"📸 Payment for {nm}\nUser: `{uid}`", reply_markup=mk)
+        except Exception: pass
         return
 
     is_owner = (uid == OWNER_ID)
     seller_key = key_of_seller_tg(uid)
     if not is_owner and not seller_key: return
 
-    # ========= RESTORE DATABASE =========
-    if wait == "restore":
-        try:
-            if m.content_type == "document":
-                f = bot.get_file(m.document.file_id)
-                data = json.loads(bot.download_file(f.file_path).decode())
-            else:
-                data = json.loads(txt)
-            d2 = fresh_state(); d2.update(data)
-            d2.setdefault("hub", new_store()); d2.setdefault("sellers", {})
-            DB_STATE.clear(); DB_STATE.update(d2); save_db()
-            ctx.pop("wait", None)
-            bot.send_message(uid, "✅ Restore Complete! Type /start")
-        except Exception as e:
-            bot.send_message(uid, f"❌ Restore error: {e}")
+    # PRODUCT ADD & EDIT FLOW WITH AUTO DELETE
+    if wait == "addbutton" and txt:
+        parts = txt.split()
+        link = next((x for x in parts if x.startswith("http://") or x.startswith("https://")), "https://example.com")
+        pname = " ".join([x for x in parts if x != link]) if link in parts else txt
+        pid = str(len(st.get("products", [])) + 1)
+        st["products"].append({"id": pid, "name": pname, "link": link, "videos": [], "position": len(st["products"]) + 1})
+        save_db(); ctx.pop("wait", None)
         delete_msg_safe(uid, m.message_id)
-        return
+        render(uid); return
 
-    if is_owner:
-        if wait == "expseller":
-            sid = txt.strip()
-            if sid in DB_STATE["sellers"]:
-                s_data = json.dumps({sid: DB_STATE["sellers"][sid]}, indent=2)
-                bot.send_document(uid, (f"{sid}_backup.json", s_data.encode()))
-                bot.send_message(uid, f"✅ Backup for `{sid}` sent successfully.")
-            else:
-                bot.send_message(uid, f"❌ Seller `{sid}` not found.")
-            delete_msg_safe(uid, m.message_id)
-            ctx.pop("wait", None); render(uid); return
+    if wait and wait.startswith("editname_"):
+        pid = wait.replace("editname_", "")
+        p = next((x for x in st.get("products", []) if str(x["id"]) == str(pid)), None)
+        if p: p["name"] = txt; save_db()
+        ctx.pop("wait", None)
+        delete_msg_safe(uid, m.message_id)
+        render(uid); return
 
-        if wait == "impseller":
-            try:
-                if m.content_type == "document":
-                    f = bot.get_file(m.document.file_id)
-                    data = json.loads(bot.download_file(f.file_path).decode())
-                else:
-                    data = json.loads(txt)
-                for sid, s_store in data.items():
-                    DB_STATE["sellers"][sid] = s_store
-                save_db()
-                bot.send_message(uid, "✅ Specific seller data restored successfully!")
-            except Exception as e:
-                bot.send_message(uid, f"❌ Single restore error: {e}")
-            delete_msg_safe(uid, m.message_id)
-            ctx.pop("wait", None); render(uid); return
+    if wait and wait.startswith("editlink_"):
+        pid = wait.replace("editlink_", "")
+        p = next((x for x in st.get("products", []) if str(x["id"]) == str(pid)), None)
+        if p: p["link"] = txt; save_db()
+        ctx.pop("wait", None)
+        delete_msg_safe(uid, m.message_id)
+        render(uid); return
 
-        if wait == "addseller":
-            try:
-                parts = txt.split()
-                tg_id = int(parts[0])
-                time_str = parts[1] if len(parts) > 1 else "1d"
+    if wait == "posbutton" and txt:
+        try:
+            parts = txt.split()
+            pid, pos = parts[0], int(parts[1])
+            for p in st.get("products", []):
+                if str(p["id"]) == str(pid): p["position"] = pos
+            save_db()
+        except Exception: pass
+        ctx.pop("wait", None)
+        delete_msg_safe(uid, m.message_id)
+        render(uid); return
 
-                try:
-                    user_chat = bot.get_chat(tg_id)
-                    seller_name = user_chat.first_name or f"Seller_{tg_id}"
-                except Exception:
-                    seller_name = f"Seller_{tg_id}"
-
-                sid = f"s{len(DB_STATE['sellers']) + 1}"
-                s = new_store()
-                s["tg_id"] = tg_id
-                s["seller_name"] = seller_name
-                s["broadcast_perm"] = False
-                
-                sec = parse_duration(time_str)
-                if sec:
-                    s["expiry_time"] = time.time() + sec
-
-                DB_STATE["sellers"][sid] = s
-                save_db()
-                bot.send_message(uid, f"✅ Seller **{seller_name}** (`{sid}`) added successfully!")
-            except Exception:
-                bot.send_message(uid, "❌ Format: `123456789 1d` (TG_ID Time)")
-            delete_msg_safe(uid, m.message_id)
-            ctx.pop("wait", None); render(uid); return
-
-        if wait == "settime":
-            try:
-                parts = txt.split()
-                sid = parts[0]
-                t_val = parts[1]
-                if sid in DB_STATE["sellers"]:
-                    is_add = t_val.startswith("+")
-                    clean_t = t_val.lstrip("+")
-                    sec = parse_duration(clean_t)
-                    if sec:
-                        curr = DB_STATE["sellers"][sid].get("expiry_time")
-                        now = time.time()
-                        if is_add and curr and curr > now:
-                            DB_STATE["sellers"][sid]["expiry_time"] = curr + sec
-                        else:
-                            DB_STATE["sellers"][sid]["expiry_time"] = now + sec
-                        save_db()
-                        bot.send_message(uid, f"✅ Time updated for `{sid}`.")
-                    else:
-                        bot.send_message(uid, "❌ Invalid time format.")
-                else:
-                    bot.send_message(uid, f"❌ Seller `{sid}` not found.")
-            except Exception:
-                bot.send_message(uid, "❌ Format: `s1 2d` or `s1 +1d`")
-            delete_msg_safe(uid, m.message_id)
-            ctx.pop("wait", None); render(uid); return
-
-        if wait == "ownbc" and txt.startswith("bct_"):
-            sid = txt.split("_", 1)[1]
-            ctx["_bc_key"] = sid; ctx["wait"] = "cb"
-            delete_msg_safe(uid, m.message_id)
-            edit_panel(uid, f"{sid} users broadcast message:", kb([BACK(uid)])); return
+    if (wait == "addvidprod" or m.content_type == "video") and m.content_type == "video":
+        vid_id = m.video.file_id
+        if not st.get("products"):
+            st["products"].append({"id": "1", "name": "New Product", "videos": [vid_id], "link": "https://example.com", "position": 1})
+        else:
+            st["products"][-1].setdefault("videos", []).append(vid_id)
+        save_db()
+        delete_msg_safe(uid, m.message_id)
+        render(uid); return
 
     if wait == "startvids" and m.content_type == "video":
-        st["start_videos"].append(m.video.file_id); save_db()
+        st.setdefault("start_videos", []).append(m.video.file_id); save_db()
         delete_msg_safe(uid, m.message_id)
-        edit_panel(uid, f"✅ Video added! Total: {len(st['start_videos'])}", kb([BACK(uid)]))
-        return
+        render(uid); return
 
-    if wait == "welcome":
+    if wait == "welcome" and txt:
         st["welcome_msg"] = txt; save_db(); ctx.pop("wait", None)
         delete_msg_safe(uid, m.message_id)
         render(uid); return
@@ -750,153 +635,20 @@ def inp(m):
         delete_msg_safe(uid, m.message_id)
         render(uid); return
 
-    if wait == "paytext":
+    if wait == "paytext" and txt:
         st["payment_msg"] = txt; save_db(); ctx.pop("wait", None)
         delete_msg_safe(uid, m.message_id)
         render(uid); return
 
-    if wait == "cb":
-        do_bc(uid, st.get("users", []), m); ctx.pop("wait", None)
-        delete_msg_safe(uid, m.message_id)
+    if txt.startswith("DEL_"):
+        pid = txt.replace("DEL_", "").strip()
+        st["products"] = [x for x in st.get("products", []) if str(x["id"]) != str(pid)]
+        save_db(); delete_msg_safe(uid, m.message_id)
         render(uid); return
-
-    if wait == "bb":
-        do_bc(uid, [b.get("user_id") for b in st.get("buyers", [])], m); ctx.pop("wait", None)
-        delete_msg_safe(uid, m.message_id)
-        render(uid); return
-
-    if wait == "ab_msg":
-        store_ab(st, m); save_db(); ctx["wait"] = "ab_time"
-        delete_msg_safe(uid, m.message_id)
-        edit_panel(uid, "Interval seconds (e.g. 3600 = 1 hour):", kb([BACK(uid)])); return
-
-    if wait == "ab_time" and m.content_type == "text":
-        try:
-            st["auto_bc"]["interval_seconds"] = int(txt); st["auto_bc"]["status"] = True; save_db()
-            bot.send_message(uid, f"✅ Auto-BC ON (Interval: {int(txt)}s)")
-        except Exception: bot.send_message(uid, "❌ Send correct number.")
-        delete_msg_safe(uid, m.message_id)
-        ctx.pop("wait", None); render(uid); return
-
-    # ========= FORWARD VIDEO & FAST PRODUCT ADD METHOD (WITH AUTO-DELETE) =========
-    if m.content_type == "video" or wait in ("prodcmd", "addbutton", "addvidprod", "posbutton"):
-        st2 = store_of_key(key)
-
-        # 1. Video Add (Direct/Forward)
-        if m.content_type == "video":
-            vid_id = m.video.file_id
-            if not st2["products"]:
-                pid = "1"
-                st2["products"].append({
-                    "id": pid, "name": "New Product", "videos": [vid_id],
-                    "link": "https://example.com", "position": 1
-                })
-            else:
-                p = st2["products"][-1]
-                p.setdefault("videos", []).append(vid_id)
-                pid = p["id"]
-            save_db()
-            delete_msg_safe(uid, m.message_id)  # Auto delete user video message to clean chat
-            render(uid)
-            return
-
-        # 2. Position Change Handler
-        if wait == "posbutton":
-            try:
-                parts = txt.split()
-                pid, pos = parts[0], int(parts[1])
-                for p in st2["products"]:
-                    if str(p["id"]) == str(pid):
-                        p["position"] = pos
-                save_db()
-            except Exception: pass
-            delete_msg_safe(uid, m.message_id)
-            ctx.pop("wait", None); render(uid); return
-
-        # 3. Add Name & Link via Simple Text
-        if "http://" in txt or "https://" in txt:
-            parts = txt.split()
-            link = next((x for x in parts if x.startswith("http://") or x.startswith("https://")), None)
-            if link:
-                name_parts = [x for x in parts if x != link]
-                pname = " ".join(name_parts) if name_parts else "Product"
-                
-                if st2["products"] and st2["products"][-1].get("name") == "New Product":
-                    p = st2["products"][-1]
-                    p["name"] = pname
-                    p["link"] = link
-                else:
-                    pid = str(len(st2["products"]) + 1)
-                    st2["products"].append({
-                        "id": pid, "name": pname, "videos": [],
-                        "link": link, "position": len(st2["products"]) + 1
-                    })
-                save_db()
-                delete_msg_safe(uid, m.message_id)  # Auto delete user text message
-                render(uid)
-                return
-
-        # Delete Product Command
-        if txt.startswith("DEL_") or txt.startswith("DEL "):
-            parts = txt.replace("DEL ", "DEL_").split("_", 1)
-            if len(parts) == 2:
-                pid = parts[1].strip()
-                st2["products"] = [x for x in st2["products"] if str(x["id"]) != str(pid)]
-                save_db()
-                delete_msg_safe(uid, m.message_id)
-                render(uid)
-            return
-
-def store_ab(st, m):
-    if m.content_type == "text":
-        st["auto_bc"] = {"status": True, "interval_seconds": 3600, "message_type": "text", "file_id": None, "text": m.text}
-    elif m.content_type == "photo":
-        st["auto_bc"] = {"status": True, "interval_seconds": 3600, "message_type": "photo", "file_id": m.photo[-1].file_id, "text": m.caption or ""}
-    elif m.content_type == "video":
-        st["auto_bc"] = {"status": True, "interval_seconds": 3600, "message_type": "video", "file_id": m.video.file_id, "text": m.caption or ""}
-
-def do_bc(uid, usrs, m):
-    ok = fail = 0
-    for u in usrs:
-        try:
-            if m.content_type == "text": bot.send_message(u, m.text, parse_mode="Markdown")
-            elif m.content_type == "photo": bot.send_photo(u, m.photo[-1].file_id, caption=m.caption, parse_mode="Markdown")
-            elif m.content_type == "video": bot.send_video(u, m.video.file_id, caption=m.caption, parse_mode="Markdown")
-            elif m.content_type == "document": bot.send_document(u, m.document.file_id, caption=m.caption, parse_mode="Markdown")
-            ok += 1
-        except Exception: fail += 1
-    bot.send_message(uid, f"✅ Sent: {ok} | Failed: {fail}")
-
-# ---------------- AUTO-BC WORKER ----------------
-def worker():
-    while True:
-        try:
-            for st in list(DB_STATE["sellers"].values()): run_ab(st)
-            run_ab(DB_STATE["hub"])
-        except Exception: pass
-        time.sleep(2)
-
-def run_ab(st):
-    bc = st.get("auto_bc", {})
-    if not bc.get("status"): return
-    now = int(time.time())
-    if bc.get("last") and now - bc["last"] < bc.get("interval_seconds", 3600): return
-    bc["last"] = now; save_db()
-    for u in list(st.get("users", [])):
-        if u in st.get("blocked_users", []): continue
-        try:
-            t = bc.get("message_type")
-            if t == "photo": bot.send_photo(u, bc["file_id"], caption=bc.get("text"), parse_mode="Markdown")
-            elif t == "video": bot.send_video(u, bc["file_id"], caption=bc.get("text"), parse_mode="Markdown")
-            elif t == "document": bot.send_document(u, bc["file_id"], caption=bc.get("text"), parse_mode="Markdown")
-            else: bot.send_message(u, bc.get("text"), parse_mode="Markdown")
-        except Exception: pass
 
 @app.route('/')
-def home(): return "Bot running successfully!"
+def home(): return "Bot running!"
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: bot.infinity_polling(), daemon=True).start()
-    threading.Thread(target=worker, daemon=True).start()
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
