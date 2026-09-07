@@ -127,7 +127,6 @@ def auto_broadcast_worker():
                 txt = bc_config.get("text", "")
 
                 for u_id in DB_STATE.get("users", []):
-                    # Do not send to ADMIN_ID / Sub-admins directly if intended for clients only
                     if u_id in DB_STATE.get("blocked_users", []):
                         continue
                     try:
@@ -164,9 +163,6 @@ def start_command(message):
 
     if user_id == ADMIN_ID:
         markup.row(InlineKeyboardButton("⚙️ Open Admin Panel ⚙️", callback_data="adm_open_panel"))
-
-    # Night Mode Override Logic
-    night_active = is_night_mode_active()
 
     products = sorted(DB_STATE.get("products", []), key=lambda x: x.get("position", 999))
     layout = DB_STATE.get("layout_style", "vertical")
@@ -220,7 +216,6 @@ def show_main_admin_menu(chat_id):
     markup.row(InlineKeyboardButton("🎥 Set 'How To Use' Video", callback_data="adm_set_how_vid"))
     markup.row(InlineKeyboardButton("💳 Global Payment Config", callback_data="adm_pay_config_menu"))
     
-    # Broadcast Options Only for Main Owner (ADMIN_ID)
     if chat_id == ADMIN_ID:
         markup.row(InlineKeyboardButton("🚀 Owner Broadcast to All Users", callback_data="adm_send_custom_bc"))
         markup.row(InlineKeyboardButton("⏱️ Auto Timed Broadcast", callback_data="adm_autobc_menu"))
@@ -562,7 +557,6 @@ def handle_callbacks(call):
             update_admin_panel(ADMIN_ID, "🚀 **Send the message (Text, Photo, Video, etc.) for Custom Broadcast:**", markup)
             user_states[ADMIN_ID] = "WAITING_CUSTOM_BROADCAST"
 
-        # --- NIGHT MODE & STATS MENU ---
         elif data == "adm_night_mode_menu":
             nm = DB_STATE.get("night_mode", {})
             status_str = "🟢 ACTIVE" if nm.get("enabled") else "🔴 INACTIVE"
@@ -602,7 +596,6 @@ def handle_callbacks(call):
             markup.row(InlineKeyboardButton("🔙 Back to Night Mode", callback_data="adm_night_mode_menu"))
             update_admin_panel(ADMIN_ID, text, markup)
 
-        # --- AUTO BROADCAST ADMIN MENUS ---
         elif data == "adm_autobc_menu":
             bc = DB_STATE.get("auto_bc", {})
             status_str = "🟢 ON" if bc.get("status") else "🔴 OFF"
@@ -746,7 +739,6 @@ def handle_callbacks(call):
                 }
                 DB_STATE["buyers"].append(buyer_info)
 
-                # Log to Night Mode Stats if active
                 if is_night_mode_active():
                     DB_STATE["night_purchases_stats"].append(buyer_info)
 
@@ -766,7 +758,7 @@ def handle_callbacks(call):
         elif data.startswith("adm_reject_"):
             try:
                 target_user = int(data.split("_")[2])
-                bot.send_message(target_user, "❌ 𝗣𝗮𝘆𝗺𝗲𝗻𝘁 𝗻𝗼𝘁 𝗿𝗲𝗰𝗶𝘃𝗲. 𝗣𝗹𝗲𝗮𝘀𝗲 𝘁𝗿𝘆 𝗮𝗴𝗮𝗶𝗻...")
+                bot.send_message(target_user, DB_STATE.get("reject_msg", "❌ 𝗣𝗮𝘆𝗺𝗲𝗻𝘁 𝗻𝗼𝘁 𝗿𝗲𝗰𝗶𝘃𝗲. 𝗣𝗹𝗲𝗮𝘀𝗲 𝘁𝗿𝘆 𝗮𝗴𝗮𝗶𝗻..."))
                 try: 
                     bot.edit_message_caption(caption=f"{call.message.caption}\n\n❌ **Status:** Rejected by Admin", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
                 except:
@@ -1095,7 +1087,6 @@ def handle_all_inputs(message):
             user_tag = f"@{username}" if username else "No Username"
             user_name = message.from_user.first_name or "User"
 
-            # Check if Night Mode redirects target admin to OWNER (ADMIN_ID)
             target_admin = ADMIN_ID if is_night_mode_active() else ADMIN_ID
 
             try:
