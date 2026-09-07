@@ -10,6 +10,13 @@ LOG_CHANNEL_ID = int(os.environ.get('LOG_CHANNEL_ID', '0'))
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
+# Bot Username dynamically fetch
+BOT_USERNAME = ""
+try:
+    BOT_USERNAME = bot.get_me().username
+except Exception:
+    pass
+
 # ---------------- TIME PARSER & FORMATTER HELPERS ----------------
 def parse_duration(time_str):
     time_str = str(time_str).strip().lower()
@@ -39,6 +46,13 @@ def format_time_left(expiry_time):
     if mins > 0: parts.append(f"{mins}m")
     if secs > 0 and not days and not hours: parts.append(f"{secs}s")
     return " ".join(parts) + " left ⏳"
+
+# Safe delete helper
+def delete_msg_safe(chat_id, msg_id):
+    try:
+        bot.delete_message(chat_id, msg_id)
+    except Exception:
+        pass
 
 # ---------------- DATA MODEL ----------------
 def new_store():
@@ -158,7 +172,7 @@ def render(uid):
     route = top(uid)
     key = ctx.get("key", "hub")
 
-    # ADMIN PANEL (এখন বাকি সময় একদম উপরে সুন্দর করে দেখাবে)
+    # ADMIN PANEL
     if route == "admin" or route == "seller":
         store = store_of_key(key)
         lp = "↔️ Horizontal" if store.get("layout_style") == "horizontal" else "↕️ Vertical"
@@ -166,8 +180,11 @@ def render(uid):
         time_status = format_time_left(store.get("expiry_time")) if key != "hub" else "Owner Access 👑"
         sname = store.get("seller_name", "Seller")
         
+        # Build Product Link for Admin
+        prod_link = f"https://t.me/{BOT_USERNAME}?start={key}" if key != "hub" else f"https://t.me/{BOT_USERNAME}"
+        
         rows = [
-            [InlineKeyboardButton("🛍️ Products", callback_data="SUB_products")],
+            [InlineKeyboardButton("🛍️ Product Button Management", callback_data="SUB_products")],
             [InlineKeyboardButton("📐 Layout: " + lp, callback_data="ACT_togglelayout")],
             [InlineKeyboardButton("📦 Buyers List", callback_data="GO_bl")],
             [InlineKeyboardButton("🎞️ Start Videos", callback_data="SUB_startvids")],
@@ -180,12 +197,13 @@ def render(uid):
             rows.append([InlineKeyboardButton("👑 Switch to Owner Panel", callback_data="GO_owner")])
             
         header = f"🛠️ **Admin Panel** ({sname})\n"
-        header += f"⌛ **Time Remaining:** `{time_status}`"
+        header += f"⌛ **Time Remaining:** `{time_status}`\n"
+        header += f"🔗 **Your Bot Store Link:**\n`{prod_link}`"
         
         edit_panel(uid, header, kb(*rows))
         return
 
-    # OWNER PANEL (Takeover schedule অপশন সরিয়ে দেওয়া হয়েছে)
+    # OWNER PANEL
     if route == "owner":
         rows = [
             [InlineKeyboardButton("👥 Manage Sellers", callback_data="GO_sellers")],
@@ -201,13 +219,13 @@ def render(uid):
         edit_panel(uid, "👑 **OWNER PANEL**", kb(*rows))
         return
 
-    # MANAGE SELLERS (বাটন দিয়ে সেলার ডিলিট করার ব্যবস্থা)
+    # MANAGE SELLERS
     if route == "sellers":
         s = "👥 **Sellers Management**\n\n"
         for k, st in DB_STATE["sellers"].items():
             name = st.get('seller_name', 'Seller')
             rem = format_time_left(st.get('expiry_time'))
-            s += f"👤 **{name}** | Time: `{rem}`\n"
+            s += f"👤 **{name}** (`{k}`) | Time: `{rem}`\n"
         if not DB_STATE["sellers"]: s += "(No seller added yet)\n"
         
         edit_panel(uid, s, kb(
@@ -217,7 +235,7 @@ def render(uid):
             [BACK(uid)]))
         return
 
-    # DELETE SELLER MENU (সমস্ত সেলারের নামের বাটন আসবে)
+    # DELETE SELLER MENU
     if route == "del_seller_menu":
         if not DB_STATE["sellers"]:
             edit_panel(uid, "❌ No seller to delete.", kb([BACK(uid)]))
@@ -306,14 +324,23 @@ def render(uid):
         elif sub == "products":
             st = store_of_key(key)
             sname = st.get("seller_name", key)
-            s = f"🛍️ **Products Management** ({sname})\n\n"
-            for p in st["products"]:
-                s += f"🆔 `{p['id']}` - **{p['name']}**\n🔗 Link: {p.get('link','None')}\n\n"
+            
+            s = f"🛍️ **Product Button Management ({sname})**\n\n"
             s += "📌 **Add Product Method:**\n"
             s += "1. Send or Forward Video.\n"
             s += "2. Send Text: `Product Name https://link.com`\n\n"
-            s += "📌 **Delete Product:** `DEL_id`"
-            edit_panel(uid, s, kb([BACK(uid)]))
+            s += "📌 **Delete Product:** Click 'Delete Button' below or send `DEL_id`"
+            
+            # Buttons matching user screenshot (excluding Edit Details / Link)
+            rows = [
+                [InlineKeyboardButton("❇️ Add New Button", callback_data="W_addbutton")],
+                [InlineKeyboardButton("🔢 Change Position", callback_data="W_posbutton")],
+                [InlineKeyboardButton("🎥 Add Videos", callback_data="W_addvidprod")],
+                [InlineKeyboardButton("⚙️ Manage Videos", callback_data="W_manvidprod")],
+                [InlineKeyboardButton("🗑️ Delete Button", callback_data="W_delbutton")],
+                [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="NAV_BACK")]
+            ]
+            edit_panel(uid, s, kb(*rows))
             user_states[uid]["wait"] = "prodcmd"
         return
 
@@ -330,9 +357,47 @@ def cb(c):
     ctx.setdefault("nav", [])
     key = ctx.get("key", "hub")
 
-    if d.startswith("home_"):
+    # USER ACTION HANDLERS (Product & How to use button fix)
+    if d.startswith("home_") or d == "HOME":
         st = store_of_key(key)
         send_menu(uid, st, (c.message.from_user.first_name or "User")); return
+    
+    if d == "HOW":
+        st = store_of_key(key)
+        v = st.get("how_to_use_video")
+        if v: bot.send_video(uid, v)
+        else: bot.send_message(uid, "ℹ️ 'How to use' video not set.")
+        return
+
+    if d == "REP":
+        ctx["wait"] = "report"
+        bot.send_message(uid, "📝 Type your report/problem:")
+        return
+
+    if d.startswith("BUY_"):
+        pid = d.split("_")[1]
+        st = store_of_key(key)
+        p = next((x for x in st.get("products", []) if str(x["id"]) == str(pid)), None)
+        if not p:
+            bot.send_message(uid, "❌ Product not found.")
+            return
+        if p.get("videos"): 
+            send_videos(uid, p["videos"])
+        cap = "📌 **" + p["name"] + "**"
+        pay = p.get("pay_msg") or st["payment_msg"]
+        mk = kb([InlineKeyboardButton("I have paid ✅", callback_data="PAID_" + str(pid))],
+                [InlineKeyboardButton("Back 🔙", callback_data="HOME")])
+        if st.get("payment_photo"):
+            bot.send_photo(uid, st["payment_photo"], caption=cap + "\n\n" + pay, reply_markup=mk, parse_mode="Markdown")
+        else:
+            bot.send_message(uid, cap + "\n\n" + pay, reply_markup=mk, parse_mode="Markdown")
+        return
+
+    if d.startswith("PAID_"):
+        ctx["wait"] = "shot"; ctx["pid"] = d.split("_")[1]
+        bot.send_message(uid, "📸 Send payment screenshot.")
+        return
+
     if d == "none": return
 
     # Panel Navigation Switches
@@ -360,7 +425,25 @@ def cb(c):
 
     if d.startswith("W_"):
         ctx["wait"] = d[2:].lower()
-        if ctx["wait"] == "addseller":
+        if ctx["wait"] == "addbutton":
+            edit_panel(uid, "❇️ Send details to add button:\nFormat: `Product Name https://link.com`", kb([BACK(uid)]))
+        elif ctx["wait"] == "posbutton":
+            edit_panel(uid, "🔢 Send product position format:\n`ID NewPosition` (e.g., `1 2`)", kb([BACK(uid)]))
+        elif ctx["wait"] == "addvidprod":
+            edit_panel(uid, "🎥 Send or Forward a Video now.", kb([BACK(uid)]))
+        elif ctx["wait"] == "manvidprod":
+            st = store_of_key(key)
+            txt = "⚙️ **Product Videos Count:**\n\n"
+            for p in st.get("products", []):
+                txt += f"• ID `{p['id']}` ({p['name']}): {len(p.get('videos', []))} vids\n"
+            edit_panel(uid, txt, kb([BACK(uid)]))
+        elif ctx["wait"] == "delbutton":
+            st = store_of_key(key)
+            txt = "🗑️ **Delete Button:**\nSend `DEL_id` (e.g. `DEL_1`)\n\n"
+            for p in st.get("products", []):
+                txt += f"🆔 `{p['id']}` - {p['name']}\n"
+            edit_panel(uid, txt, kb([BACK(uid)]))
+        elif ctx["wait"] == "addseller":
             edit_panel(uid, "Format: Send Telegram ID & Time\nExample: `123456789 1d` or `123456789 12h`", kb([BACK(uid)]))
         elif ctx["wait"] == "settime":
             edit_panel(uid, "Format: `s1 2d` or `s1 +1d`", kb([BACK(uid)]))
@@ -407,11 +490,12 @@ def send_menu(uid, store, name):
     if store.get("layout_style") == "horizontal":
         row = []
         for p in prods:
-            row.append(InlineKeyboardButton(p["name"], callback_data="BUY_" + p["id"]))
+            row.append(InlineKeyboardButton(p["name"], callback_data="BUY_" + str(p["id"])))
             if len(row) == 2: mk.row(*row); row = []
         if row: mk.row(*row)
     else:
-        for p in prods: mk.row(InlineKeyboardButton(p["name"], callback_data="BUY_" + p["id"]))
+        for p in prods: mk.row(InlineKeyboardButton(p["name"], callback_data="BUY_" + str(p["id"])))
+    
     mk.row(InlineKeyboardButton("How to use ❓", callback_data="HOW"),
            InlineKeyboardButton("Report 📩", callback_data="REP"))
     try: bot.send_message(uid, welcome, reply_markup=mk, parse_mode="Markdown")
@@ -451,41 +535,6 @@ def start_cmd(m):
     if uid not in h["users"]: h["users"].append(uid); save_db()
     send_menu(uid, h, name)
 
-# User Callback Handler
-@bot.callback_query_handler(func=lambda c: c.data.startswith(("BUY_", "HOW", "REP")))
-def user_cb(c):
-    try: bot.answer_callback_query(c.id)
-    except Exception: pass
-    uid = c.message.chat.id; d = c.data
-    ctx = user_states.setdefault(uid, {})
-    key = ctx.get("key", "hub"); st = store_of_key(key)
-    
-    if d == "HOW":
-        v = st.get("how_to_use_video")
-        if v: bot.send_video(uid, v)
-        else: bot.send_message(uid, "ℹ️ Video not set.")
-        return
-    if d == "REP":
-        ctx["wait"] = "report"; bot.send_message(uid, "📝 Type your report/problem:"); return
-    if d.startswith("BUY_"):
-        pid = d.split("_")[1]
-        p = next((x for x in st["products"] if x["id"] == pid), None)
-        if not p: return
-        if p.get("videos"): send_videos(uid, p["videos"])
-        cap = "📌 **" + p["name"] + "**"
-        pay = p.get("pay_msg") or st["payment_msg"]
-        mk = kb([InlineKeyboardButton("I have paid ✅", callback_data="PAID_" + pid)],
-                [InlineKeyboardButton("Back 🔙", callback_data="HOME")])
-        if st.get("payment_photo"):
-            bot.send_photo(uid, st["payment_photo"], caption=cap + "\n\n" + pay, reply_markup=mk, parse_mode="Markdown")
-        else:
-            bot.send_message(uid, cap + "\n\n" + pay, reply_markup=mk, parse_mode="Markdown")
-    if d == "HOME":
-        send_menu(uid, store_of_key(ctx.get("key","hub")), c.message.from_user.first_name or "User")
-    if d.startswith("PAID_"):
-        ctx["wait"] = "shot"; ctx["pid"] = d.split("_")[1]
-        bot.send_message(uid, "📸 Send payment screenshot.")
-
 # Payment confirmation buttons
 @bot.callback_query_handler(func=lambda c: c.data.startswith(("adm_confirm_", "adm_reject_", "adm_block_")))
 def confirm_cb(c):
@@ -497,7 +546,7 @@ def confirm_cb(c):
             parts = d.split("_")
             key, pid, tu = parts[2], parts[3], int(parts[4])
             st = store_of_key(key)
-            p = next((x for x in st["products"] if x["id"] == pid), None)
+            p = next((x for x in st["products"] if str(x["id"]) == str(pid)), None)
             link = p["link"] if p else "No link"
             nm = p["name"] if p else "Product"
             st["buyers"].append({"user_id": tu, "name": "User", "username": "?", "product": nm,
@@ -527,7 +576,9 @@ def inp(m):
 
     if txt in ("/done", "/cancel"):
         ctx.pop("wait", None)
-        bot.send_message(uid, "✅ Cancelled / Completed."); return
+        bot.send_message(uid, "✅ Cancelled / Completed.")
+        delete_msg_safe(uid, m.message_id)
+        return
 
     if wait == "report":
         ctx.pop("wait", None)
@@ -543,7 +594,7 @@ def inp(m):
     if wait == "shot" and m.content_type == "photo":
         ctx.pop("wait", None)
         pid = ctx.get("pid")
-        p = next((x for x in st["products"] if x["id"] == pid), None)
+        p = next((x for x in st["products"] if str(x["id"]) == str(pid)), None)
         nm = p["name"] if p else "Product"
         if key == "hub":
             adm = OWNER_ID; label = "Owner Hub"
@@ -584,6 +635,7 @@ def inp(m):
             bot.send_message(uid, "✅ Restore Complete! Type /start")
         except Exception as e:
             bot.send_message(uid, f"❌ Restore error: {e}")
+        delete_msg_safe(uid, m.message_id)
         return
 
     if is_owner:
@@ -595,6 +647,7 @@ def inp(m):
                 bot.send_message(uid, f"✅ Backup for `{sid}` sent successfully.")
             else:
                 bot.send_message(uid, f"❌ Seller `{sid}` not found.")
+            delete_msg_safe(uid, m.message_id)
             ctx.pop("wait", None); render(uid); return
 
         if wait == "impseller":
@@ -610,16 +663,15 @@ def inp(m):
                 bot.send_message(uid, "✅ Specific seller data restored successfully!")
             except Exception as e:
                 bot.send_message(uid, f"❌ Single restore error: {e}")
+            delete_msg_safe(uid, m.message_id)
             ctx.pop("wait", None); render(uid); return
 
-        # ADD SELLER (শুধু TG ID এবং Time টাইপ করলেই হবে, নাম টেলিগ্রাম থেকে নিয়ে নেবে)
         if wait == "addseller":
             try:
                 parts = txt.split()
                 tg_id = int(parts[0])
                 time_str = parts[1] if len(parts) > 1 else "1d"
 
-                # Get Name from Telegram
                 try:
                     user_chat = bot.get_chat(tg_id)
                     seller_name = user_chat.first_name or f"Seller_{tg_id}"
@@ -641,6 +693,7 @@ def inp(m):
                 bot.send_message(uid, f"✅ Seller **{seller_name}** (`{sid}`) added successfully!")
             except Exception:
                 bot.send_message(uid, "❌ Format: `123456789 1d` (TG_ID Time)")
+            delete_msg_safe(uid, m.message_id)
             ctx.pop("wait", None); render(uid); return
 
         if wait == "settime":
@@ -667,45 +720,69 @@ def inp(m):
                     bot.send_message(uid, f"❌ Seller `{sid}` not found.")
             except Exception:
                 bot.send_message(uid, "❌ Format: `s1 2d` or `s1 +1d`")
+            delete_msg_safe(uid, m.message_id)
             ctx.pop("wait", None); render(uid); return
 
         if wait == "ownbc" and txt.startswith("bct_"):
             sid = txt.split("_", 1)[1]
             ctx["_bc_key"] = sid; ctx["wait"] = "cb"
+            delete_msg_safe(uid, m.message_id)
             edit_panel(uid, f"{sid} users broadcast message:", kb([BACK(uid)])); return
 
     if wait == "startvids" and m.content_type == "video":
         st["start_videos"].append(m.video.file_id); save_db()
+        delete_msg_safe(uid, m.message_id)
         edit_panel(uid, f"✅ Video added! Total: {len(st['start_videos'])}", kb([BACK(uid)]))
         return
+
     if wait == "welcome":
-        st["welcome_msg"] = txt; save_db(); ctx.pop("wait", None); render(uid); return
+        st["welcome_msg"] = txt; save_db(); ctx.pop("wait", None)
+        delete_msg_safe(uid, m.message_id)
+        render(uid); return
+
     if wait == "howvid" and m.content_type == "video":
-        st["how_to_use_video"] = m.video.file_id; save_db(); ctx.pop("wait", None); render(uid); return
+        st["how_to_use_video"] = m.video.file_id; save_db(); ctx.pop("wait", None)
+        delete_msg_safe(uid, m.message_id)
+        render(uid); return
+
     if wait == "payphoto" and m.content_type == "photo":
-        st["payment_photo"] = m.photo[-1].file_id; save_db(); ctx.pop("wait", None); render(uid); return
+        st["payment_photo"] = m.photo[-1].file_id; save_db(); ctx.pop("wait", None)
+        delete_msg_safe(uid, m.message_id)
+        render(uid); return
+
     if wait == "paytext":
-        st["payment_msg"] = txt; save_db(); ctx.pop("wait", None); render(uid); return
+        st["payment_msg"] = txt; save_db(); ctx.pop("wait", None)
+        delete_msg_safe(uid, m.message_id)
+        render(uid); return
 
     if wait == "cb":
-        do_bc(uid, st.get("users", []), m); ctx.pop("wait", None); render(uid); return
+        do_bc(uid, st.get("users", []), m); ctx.pop("wait", None)
+        delete_msg_safe(uid, m.message_id)
+        render(uid); return
+
     if wait == "bb":
-        do_bc(uid, [b.get("user_id") for b in st.get("buyers", [])], m); ctx.pop("wait", None); render(uid); return
+        do_bc(uid, [b.get("user_id") for b in st.get("buyers", [])], m); ctx.pop("wait", None)
+        delete_msg_safe(uid, m.message_id)
+        render(uid); return
+
     if wait == "ab_msg":
         store_ab(st, m); save_db(); ctx["wait"] = "ab_time"
+        delete_msg_safe(uid, m.message_id)
         edit_panel(uid, "Interval seconds (e.g. 3600 = 1 hour):", kb([BACK(uid)])); return
+
     if wait == "ab_time" and m.content_type == "text":
         try:
             st["auto_bc"]["interval_seconds"] = int(txt); st["auto_bc"]["status"] = True; save_db()
             bot.send_message(uid, f"✅ Auto-BC ON (Interval: {int(txt)}s)")
         except Exception: bot.send_message(uid, "❌ Send correct number.")
+        delete_msg_safe(uid, m.message_id)
         ctx.pop("wait", None); render(uid); return
 
-    # ========= FORWARD VIDEO & FAST PRODUCT ADD METHOD =========
-    if m.content_type == "video" or wait == "prodcmd":
+    # ========= FORWARD VIDEO & FAST PRODUCT ADD METHOD (WITH AUTO-DELETE) =========
+    if m.content_type == "video" or wait in ("prodcmd", "addbutton", "addvidprod", "posbutton"):
         st2 = store_of_key(key)
 
-        # 1. Video Forward or Direct Send to Add Product Video
+        # 1. Video Add (Direct/Forward)
         if m.content_type == "video":
             vid_id = m.video.file_id
             if not st2["products"]:
@@ -719,10 +796,24 @@ def inp(m):
                 p.setdefault("videos", []).append(vid_id)
                 pid = p["id"]
             save_db()
-            bot.send_message(uid, f"📹 Video saved for Product ID `{pid}`!\nNow send text format: `Product Name https://link.com`", parse_mode="Markdown")
+            delete_msg_safe(uid, m.message_id)  # Auto delete user video message to clean chat
+            render(uid)
             return
 
-        # 2. Add Name & Link via Simple Text
+        # 2. Position Change Handler
+        if wait == "posbutton":
+            try:
+                parts = txt.split()
+                pid, pos = parts[0], int(parts[1])
+                for p in st2["products"]:
+                    if str(p["id"]) == str(pid):
+                        p["position"] = pos
+                save_db()
+            except Exception: pass
+            delete_msg_safe(uid, m.message_id)
+            ctx.pop("wait", None); render(uid); return
+
+        # 3. Add Name & Link via Simple Text
         if "http://" in txt or "https://" in txt:
             parts = txt.split()
             link = next((x for x in parts if x.startswith("http://") or x.startswith("https://")), None)
@@ -741,7 +832,8 @@ def inp(m):
                         "link": link, "position": len(st2["products"]) + 1
                     })
                 save_db()
-                bot.send_message(uid, f"✅ Product Saved!\n📌 **Name:** {pname}\n🔗 **Link:** {link}", parse_mode="Markdown")
+                delete_msg_safe(uid, m.message_id)  # Auto delete user text message
+                render(uid)
                 return
 
         # Delete Product Command
@@ -749,9 +841,10 @@ def inp(m):
             parts = txt.replace("DEL ", "DEL_").split("_", 1)
             if len(parts) == 2:
                 pid = parts[1].strip()
-                st2["products"] = [x for x in st2["products"] if x["id"] != pid]
+                st2["products"] = [x for x in st2["products"] if str(x["id"]) != str(pid)]
                 save_db()
-                bot.send_message(uid, f"🗑️ Product `{pid}` Deleted.")
+                delete_msg_safe(uid, m.message_id)
+                render(uid)
             return
 
 def store_ab(st, m):
