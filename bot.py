@@ -131,7 +131,7 @@ def render(uid):
     route = top(uid)
     key = ctx.get("key", "hub")
 
-    # ADMIN PANEL (ALL MAIN OPTIONS MOVED HERE)
+    # ADMIN PANEL (Custom BC, Auto BC, BC to Buyers - এই ৩টি অপশন সম্পূর্ণ সরিয়ে দেওয়া হয়েছে)
     if route == "admin" or route == "seller":
         store = store_of_key(key)
         lp = "↔️ Horizontal" if store.get("layout_style") == "horizontal" else "↕️ Vertical"
@@ -139,9 +139,6 @@ def render(uid):
         rows = [
             [InlineKeyboardButton("🛍️ Products", callback_data="SUB_products")],
             [InlineKeyboardButton("📐 Layout: " + lp, callback_data="ACT_togglelayout")],
-            [InlineKeyboardButton("🚀 Custom BC", callback_data="SUB_cb")],
-            [InlineKeyboardButton("⏱️ Auto BC", callback_data="SUB_ab")],
-            [InlineKeyboardButton("👑 BC to Buyers", callback_data="SUB_bb")],
             [InlineKeyboardButton("📦 Buyers List", callback_data="GO_bl")],
             [InlineKeyboardButton("🎞️ Start Videos", callback_data="SUB_startvids")],
             [InlineKeyboardButton("📝 Welcome Text", callback_data="SUB_welcome")],
@@ -155,11 +152,14 @@ def render(uid):
         edit_panel(uid, f"🛠️ **Admin Panel**\n\nStore: `{key}`", kb(*rows))
         return
 
-    # OWNER PANEL
+    # OWNER PANEL (সকল Broadcast সুবিধা শুধুমাত্র Owner এর জন্য রাখা হলো)
     if route == "owner":
         rows = [
             [InlineKeyboardButton("👥 Manage Sellers", callback_data="GO_sellers")],
             [InlineKeyboardButton("⏱️ Takeover Schedule", callback_data="GO_tk")],
+            [InlineKeyboardButton("🚀 Custom BC", callback_data="SUB_cb")],
+            [InlineKeyboardButton("⏱️ Auto BC", callback_data="SUB_ab")],
+            [InlineKeyboardButton("👑 BC to Buyers", callback_data="SUB_bb")],
             [InlineKeyboardButton("💰 All Sales", callback_data="GO_sales")],
             [InlineKeyboardButton("📣 Send BC to Seller Users", callback_data="GO_ownbc")],
             [InlineKeyboardButton("💾 Backup & Restore", callback_data="GO_bk")],
