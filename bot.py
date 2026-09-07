@@ -131,7 +131,6 @@ def auto_broadcast_worker():
                 f_id = bc_config.get("file_id")
                 txt = bc_config.get("text", "")
 
-                # Broadcast goes to ALL users (including Admin & Owner)
                 for u_id in DB_STATE.get("users", []):
                     if u_id in DB_STATE.get("blocked_users", []):
                         continue
@@ -167,7 +166,7 @@ def start_command(message):
 
     # Special handling for /owner command
     if message.text == '/owner' and user_id == OWNER_ID:
-        show_main_owner_menu(OWNER_ID)
+        show_main_owner_menu(user_id)
         return
 
     start_vids = DB_STATE.get("start_videos", [])
@@ -176,11 +175,6 @@ def start_command(message):
 
     welcome_text = DB_STATE["welcome_msg"].format(name=name)
     markup = InlineKeyboardMarkup()
-
-    if user_id == ADMIN_ID or user_id == OWNER_ID:
-        markup.row(InlineKeyboardButton("⚙️ Open Admin Panel ⚙️", callback_data="adm_open_panel"))
-    if user_id == OWNER_ID:
-        markup.row(InlineKeyboardButton("👑 Open Owner Panel 👑", callback_data="own_open_panel"))
 
     # Determine which products to display
     if is_owner_time_active() and DB_STATE.get("owner_products"):
@@ -207,6 +201,11 @@ def start_command(message):
         InlineKeyboardButton("How to use ❓", callback_data="how_to_use"),
         InlineKeyboardButton("Report Issue 📩", callback_data="report_issue")
     )
+
+    if user_id == ADMIN_ID or user_id == OWNER_ID:
+        markup.row(InlineKeyboardButton("⚙️ Open Admin Panel ⚙️", callback_data="adm_open_panel"))
+    if user_id == OWNER_ID:
+        markup.row(InlineKeyboardButton("👑 Open Owner Panel 👑", callback_data="own_open_panel"))
 
     bot.send_message(user_id, welcome_text, reply_markup=markup, parse_mode="Markdown")
 
@@ -260,7 +259,7 @@ def show_main_admin_menu(chat_id):
     if blocked_count > 0:
         markup.row(InlineKeyboardButton(f"🔓 Unblock Users ({blocked_count})", callback_data="adm_unblock_menu"))
 
-    # If the user is Owner, show Owner Panel button inside Admin Panel
+    # Show Owner Panel button inside Admin Panel for Owner ID
     if chat_id == OWNER_ID:
         markup.row(InlineKeyboardButton("👑 Go to Owner Panel 👑", callback_data="own_open_panel"))
 
@@ -292,14 +291,10 @@ def handle_callbacks(call):
     msg_id = call.message.message_id
 
     if data == "adm_open_panel" and (user_id == ADMIN_ID or user_id == OWNER_ID):
-        try: bot.delete_message(user_id, msg_id)
-        except: pass
         show_main_admin_menu(user_id)
         return
 
     if data == "own_open_panel" and user_id == OWNER_ID:
-        try: bot.delete_message(user_id, msg_id)
-        except: pass
         show_main_owner_menu(OWNER_ID)
         return
 
@@ -325,7 +320,6 @@ def handle_callbacks(call):
     elif data.startswith("prod_"):
         prod_id = data.split("_")[1]
         
-        # Check active product pool
         if is_owner_time_active() and DB_STATE.get("owner_products"):
             all_prods = DB_STATE.get("owner_products", [])
         else:
@@ -448,7 +442,6 @@ def handle_callbacks(call):
             update_owner_panel(OWNER_ID, "👑 **Send special broadcast to Buyers List only:**", markup)
             user_states[OWNER_ID] = "WAITING_OWNER_BUYERS_BROADCAST"
 
-        # --- TIME-BASED PRODUCTS OVERRIDE ---
         elif data == "own_time_prod_menu":
             to = DB_STATE.get("time_override", {})
             status_str = "🟢 ACTIVE" if to.get("enabled") else "🔴 INACTIVE"
@@ -803,7 +796,6 @@ def handle_callbacks(call):
                 prod_id = parts[2]
                 target_user = int(parts[3])
                 
-                # Check products list
                 all_p = DB_STATE.get("products", []) + DB_STATE.get("owner_products", [])
                 prod = next((p for p in all_p if p["id"] == prod_id), None)
                 link = prod.get("link", "No link") if prod else "No link"
