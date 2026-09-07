@@ -131,15 +131,27 @@ def render(uid):
     route = top(uid)
     key = ctx.get("key", "hub")
 
-    # ADMIN PANEL (Default fast panel for Owner & Sellers)
+    # ADMIN PANEL (ALL MAIN OPTIONS MOVED HERE)
     if route == "admin" or route == "seller":
-        s = store_of_key(key)
+        store = store_of_key(key)
+        lp = "↔️ Horizontal" if store.get("layout_style") == "horizontal" else "↕️ Vertical"
+        
         rows = [
             [InlineKeyboardButton("🛍️ Products", callback_data="SUB_products")],
-            [InlineKeyboardButton("⚙️ Settings", callback_data="GO_cfg")],
+            [InlineKeyboardButton("📐 Layout: " + lp, callback_data="ACT_togglelayout")],
+            [InlineKeyboardButton("🚀 Custom BC", callback_data="SUB_cb")],
+            [InlineKeyboardButton("⏱️ Auto BC", callback_data="SUB_ab")],
+            [InlineKeyboardButton("👑 BC to Buyers", callback_data="SUB_bb")],
+            [InlineKeyboardButton("📦 Buyers List", callback_data="GO_bl")],
+            [InlineKeyboardButton("🎞️ Start Videos", callback_data="SUB_startvids")],
+            [InlineKeyboardButton("📝 Welcome Text", callback_data="SUB_welcome")],
+            [InlineKeyboardButton("🎥 How-To-Use Video", callback_data="SUB_howvid")],
+            [InlineKeyboardButton("💳 Payment Config", callback_data="SUB_pay")],
+            [InlineKeyboardButton("💾 Backup & Restore Store", callback_data="GO_bk")]
         ]
         if uid == OWNER_ID:
             rows.append([InlineKeyboardButton("👑 Switch to Owner Panel", callback_data="GO_owner")])
+            
         edit_panel(uid, f"🛠️ **Admin Panel**\n\nStore: `{key}`", kb(*rows))
         return
 
@@ -154,26 +166,6 @@ def render(uid):
             [InlineKeyboardButton("🛠️ Switch to Admin Panel", callback_data="GO_admin")]
         ]
         edit_panel(uid, "👑 **OWNER PANEL**", kb(*rows))
-        return
-
-    # SETTINGS MENU (Auto BC, Custom BC, Buyers, Layout, etc.)
-    if route == "cfg":
-        store = store_of_key(key)
-        lp = "↔️ Horizontal" if store.get("layout_style") == "horizontal" else "↕️ Vertical"
-        rows = [
-            [InlineKeyboardButton("📐 Layout: " + lp, callback_data="ACT_togglelayout")],
-            [InlineKeyboardButton("🚀 Custom BC", callback_data="SUB_cb")],
-            [InlineKeyboardButton("⏱️ Auto BC", callback_data="SUB_ab")],
-            [InlineKeyboardButton("👑 BC to Buyers", callback_data="SUB_bb")],
-            [InlineKeyboardButton("📦 Buyers List", callback_data="GO_bl")],
-            [InlineKeyboardButton("🎞️ Start Videos", callback_data="SUB_startvids")],
-            [InlineKeyboardButton("📝 Welcome Text", callback_data="SUB_welcome")],
-            [InlineKeyboardButton("🎥 How-To-Use Video", callback_data="SUB_howvid")],
-            [InlineKeyboardButton("💳 Payment Config", callback_data="SUB_pay")],
-            [InlineKeyboardButton("💾 Backup & Restore Store", callback_data="GO_bk")],
-            [BACK(uid)]
-        ]
-        edit_panel(uid, f"⚙️ **Store Settings** — `{key}`", kb(*rows))
         return
 
     if route == "sellers":
@@ -297,7 +289,6 @@ def cb(c):
     # Panel Navigation Switches
     if d == "GO_owner": push(uid, "owner"); render(uid); return
     if d == "GO_admin": push(uid, "admin"); render(uid); return
-    if d == "GO_cfg": push(uid, "cfg"); render(uid); return
     if d == "GO_sellers": push(uid, "sellers"); render(uid); return
     if d == "GO_tk": push(uid, "tk"); render(uid); return
     if d == "GO_sales": push(uid, "sales"); render(uid); return
@@ -613,7 +604,7 @@ def inp(m):
             ctx["_bc_key"] = sid; ctx["wait"] = "cb"
             edit_panel(uid, f"{sid} er users der jonno message pathan:", kb([BACK(uid)])); return
 
-    # ========= PRODUCT COMMANDS HANDLER (FIXED) =========
+    # ========= PRODUCT COMMANDS HANDLER =========
     if wait == "prodcmd":
         st2 = store_of_key(key)
         
