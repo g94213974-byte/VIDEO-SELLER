@@ -27,7 +27,14 @@ DB_STATE = {
     "products": [],
     "blocked_users": [],
     "users": [],
-    "buyers": []
+    "buyers": [],
+    "auto_bc": {
+        "status": False,
+        "interval_seconds": 3600,
+        "message_type": None,
+        "file_id": None,
+        "text": None
+    }
 }
 
 # --- TELEGRAM CHANNEL DATABASE LOGIC ---
@@ -39,6 +46,8 @@ def load_db():
             loaded_data = json.loads(chat.pinned_message.text)
             DB_STATE.update(loaded_data)
             if "buyers" not in DB_STATE: DB_STATE["buyers"] = []
+            if "auto_bc" not in DB_STATE:
+                DB_STATE["auto_bc"] = {"status": False, "interval_seconds": 3600, "message_type": None, "file_id": None, "text": None}
     except Exception as e:
         save_db()
 
@@ -75,6 +84,41 @@ def send_videos_as_album(chat_id, video_list):
                 for v in chunk:
                     try: bot.send_video(chat_id, v)
                     except: pass
+
+# --- AUTO BROADCAST BACKGROUND WORKER ---
+def auto_broadcast_worker():
+    while True:
+        try:
+            bc_config = DB_STATE.get("auto_bc", {})
+            if bc_config.get("status") and bc_config.get("interval_seconds", 0) > 0:
+                interval = bc_config.get("interval_seconds")
+                time.sleep(interval)
+                
+                if not DB_STATE.get("auto_bc", {}).get("status"):
+                    continue
+
+                m_type = bc_config.get("message_type")
+                f_id = bc_config.get("file_id")
+                txt = bc_config.get("text", "")
+
+                for u_id in DB_STATE.get("users", []):
+                    if u_id in DB_STATE.get("blocked_users", []):
+                        continue
+                    try:
+                        if m_type == "text" or not m_type:
+                            bot.send_message(u_id, txt, parse_mode="Markdown")
+                        elif m_type == "photo":
+                            bot.send_photo(u_id, f_id, caption=txt, parse_mode="Markdown")
+                        elif m_type == "video":
+                            bot.send_video(u_id, f_id, caption=txt, parse_mode="Markdown")
+                        elif m_type == "document":
+                            bot.send_document(u_id, f_id, caption=txt, parse_mode="Markdown")
+                    except:
+                        pass
+            else:
+                time.sleep(2)
+        except Exception:
+            time.sleep(2)
 
 @bot.message_handler(commands=['start', 'admin'])
 def start_command(message):
@@ -147,6 +191,9 @@ def show_main_admin_menu(chat_id):
     markup.row(InlineKeyboardButton("🎥 Set 'How To Use' Video", callback_data="adm_set_how_vid"))
     markup.row(InlineKeyboardButton("💳 Global Payment Config", callback_data="adm_pay_config_menu"))
     
+    markup.row(InlineKeyboardButton("🚀 Send Custom Broadcast", callback_data="adm_send_custom_bc"))
+    markup.row(InlineKeyboardButton("⏱️ Auto Timed Broadcast", callback_data="adm_autobc_menu"))
+    markup.row(InlineKeyboardButton("👑 Special Broadcast to Buyers", callback_data="adm_buyers_bc_menu"))
     markup.row(InlineKeyboardButton("📦 View Buyers List", callback_data="adm_view_buyers_list"))
     markup.row(InlineKeyboardButton("💾 Backup & Restore Settings", callback_data="adm_backup_menu"))
     
@@ -476,6 +523,94 @@ def handle_callbacks(call):
             update_admin_panel(ADMIN_ID, "💳 **Please send Payment QR Code Photo:**", markup)
             user_states[ADMIN_ID] = "ADM_SET_PAY_PHOTO"
 
+        elif data == "adm_send_custom_bc":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_back_panel"))
+            update_admin_panel(ADMIN_ID, "🚀 **Send the message (Text, Photo, Video, etc.) for Custom Broadcast:**", markup)
+            user_states[ADMIN_ID] = "WAITING_CUSTOM_BROADCAST"
+
+        # --- AUTO BROADCAST ADMIN MENUS ---
+        elif data == "adm_autobc_menu":
+            bc = DB_STATE.get("auto_bc", {})
+            status_str = "🟢 ON" if bc.get("status") else "🔴 OFF"
+            interval_sec = bc.get("interval_seconds", 3600)
+            
+            if interval_sec < 60:
+                interval_txt = f"{interval_sec} Seconds"
+            elif interval_sec < 3600:
+                interval_txt = f"{interval_sec // 60} Minutes"
+            else:
+                interval_txt = f"{interval_sec // 3600} Hours"
+
+            markup = InlineKeyboardMarkup()
+            toggle_text = "🔴 Turn OFF Auto Broadcast" if bc.get("status") else "🟢 Turn ON Auto Broadcast"
+            markup.row(InlineKeyboardButton(toggle_text, callback_data="adm_autobc_toggle"))
+            markup.row(InlineKeyboardButton("✏️ Set Message & Media", callback_data="adm_autobc_set_msg"))
+            markup.row(InlineKeyboardButton("⏱️ Set Preset Time", callback_data="adm_autobc_set_time"))
+            markup.row(InlineKeyboardButton("✍️ Set Custom Timer (Seconds/Minutes)", callback_data="adm_autobc_custom_time"))
+            markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
+
+            preview_txt = bc.get("text", "Not Set")
+            if preview_txt and len(preview_txt) > 50:
+                preview_txt = preview_txt[:50] + "..."
+
+            text = (
+                f"⏱️ **Auto Timed Broadcast Settings**\n\n"
+                f"- **Status:** {status_str}\n"
+                f"- **Interval:** {interval_txt} ({interval_sec} secs)\n"
+                f"- **Message Type:** {bc.get('message_type', 'None')}\n"
+                f"- **Content Preview:** {preview_txt}\n\n"
+                f"Configure your automatic recurring broadcast below:"
+            )
+            update_admin_panel(ADMIN_ID, text, markup)
+
+        elif data == "adm_autobc_toggle":
+            bc = DB_STATE.get("auto_bc", {})
+            bc["status"] = not bc.get("status", False)
+            save_db()
+            call.data = "adm_autobc_menu"
+            handle_callbacks(call)
+
+        elif data == "adm_autobc_set_msg":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_autobc_menu"))
+            update_admin_panel(ADMIN_ID, "📤 **Send the message (Text, Photo, Video, or Document) that you want to loop automatically:**", markup)
+            user_states[ADMIN_ID] = "WAITING_AUTOBC_MSG"
+
+        elif data == "adm_autobc_set_time":
+            markup = InlineKeyboardMarkup()
+            markup.row(
+                InlineKeyboardButton("10 Sec", callback_data="adm_autobc_t_10"),
+                InlineKeyboardButton("1 Min", callback_data="adm_autobc_t_60"),
+                InlineKeyboardButton("5 Mins", callback_data="adm_autobc_t_300")
+            )
+            markup.row(
+                InlineKeyboardButton("1 Hour", callback_data="adm_autobc_t_3600"),
+                InlineKeyboardButton("6 Hours", callback_data="adm_autobc_t_21600"),
+                InlineKeyboardButton("24 Hours", callback_data="adm_autobc_t_86400")
+            )
+            markup.row(InlineKeyboardButton("🔙 Back", callback_data="adm_autobc_menu"))
+            update_admin_panel(ADMIN_ID, "⏱️ **Select preset time interval:**", markup)
+
+        elif data == "adm_autobc_custom_time":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_autobc_menu"))
+            update_admin_panel(ADMIN_ID, "✍️ **Type custom timer duration:**\n\n- Example: type `30` for 30 Seconds\n- Example: type `120` for 2 Minutes\n- Example: type `3600` for 1 Hour\n\nSend time in **Seconds**:", markup)
+            user_states[ADMIN_ID] = "WAITING_AUTOBC_CUSTOM_TIME"
+
+        elif data.startswith("adm_autobc_t_"):
+            secs = int(data.replace("adm_autobc_t_", ""))
+            DB_STATE["auto_bc"]["interval_seconds"] = secs
+            save_db()
+            call.data = "adm_autobc_menu"
+            handle_callbacks(call)
+
+        elif data == "adm_buyers_bc_menu":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_back_panel"))
+            update_admin_panel(ADMIN_ID, "👑 **Send the special message (Text, Photo, Video) for Buyers List only:**", markup)
+            user_states[ADMIN_ID] = "WAITING_BUYERS_BROADCAST"
+
         elif data == "adm_view_buyers_list":
             buyers = DB_STATE.get("buyers", [])
             if not buyers:
@@ -685,6 +820,101 @@ def handle_all_inputs(message):
             show_main_admin_menu(ADMIN_ID)
             return
 
+        elif state == "WAITING_CUSTOM_BROADCAST":
+            user_states.pop(user_id, None)
+            update_admin_panel(ADMIN_ID, "🚀 Broadcasting message to all users... Please wait.", None)
+            success_count = 0
+            fail_count = 0
+            for u_id in DB_STATE.get("users", []):
+                if u_id in DB_STATE.get("blocked_users", []): continue
+                try:
+                    if message.content_type == 'text':
+                        bot.send_message(u_id, message.text, parse_mode="Markdown")
+                    elif message.content_type == 'photo':
+                        bot.send_photo(u_id, message.photo[-1].file_id, caption=message.caption, parse_mode="Markdown")
+                    elif message.content_type == 'video':
+                        bot.send_video(u_id, message.video.file_id, caption=message.caption, parse_mode="Markdown")
+                    elif message.content_type == 'document':
+                        bot.send_document(u_id, message.document.file_id, caption=message.caption, parse_mode="Markdown")
+                    success_count += 1
+                except Exception as e: 
+                    fail_count += 1
+            
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
+            update_admin_panel(ADMIN_ID, f"✅ **Custom Broadcast Completed!**\n\n- Successfully sent: {success_count}\n- Failed: {fail_count}", markup)
+            return
+
+        elif state == "WAITING_AUTOBC_MSG":
+            user_states.pop(user_id, None)
+            m_type = message.content_type
+            f_id = None
+            txt = message.caption or message.text or ""
+
+            if m_type == 'photo':
+                f_id = message.photo[-1].file_id
+            elif m_type == 'video':
+                f_id = message.video.file_id
+            elif m_type == 'document':
+                f_id = message.document.file_id
+            elif m_type == 'text':
+                txt = message.text
+
+            DB_STATE["auto_bc"]["message_type"] = m_type
+            DB_STATE["auto_bc"]["file_id"] = f_id
+            DB_STATE["auto_bc"]["text"] = txt
+            save_db()
+
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Back to Auto BC Menu", callback_data="adm_autobc_menu"))
+            update_admin_panel(ADMIN_ID, "✅ **Auto Broadcast Message Saved Successfully!**\n\nNow make sure the status is turned **ON**.", markup)
+            return
+
+        elif state == "WAITING_AUTOBC_CUSTOM_TIME" and message.text:
+            user_states.pop(user_id, None)
+            try:
+                custom_secs = int(message.text.strip())
+                if custom_secs < 1:
+                    custom_secs = 10
+                DB_STATE["auto_bc"]["interval_seconds"] = custom_secs
+                save_db()
+                markup = InlineKeyboardMarkup()
+                markup.row(InlineKeyboardButton("🔙 Back to Auto BC Menu", callback_data="adm_autobc_menu"))
+                update_admin_panel(ADMIN_ID, f"✅ **Custom Timer Set Successfully!**\n\nInterval: `{custom_secs}` Seconds.", markup)
+            except ValueError:
+                markup = InlineKeyboardMarkup()
+                markup.row(InlineKeyboardButton("🔙 Back to Auto BC Menu", callback_data="adm_autobc_menu"))
+                update_admin_panel(ADMIN_ID, "❌ **Invalid number!** Please send only digits (e.g., 30 for 30 seconds).", markup)
+            return
+
+        elif state == "WAITING_BUYERS_BROADCAST":
+            user_states.pop(user_id, None)
+            update_admin_panel(ADMIN_ID, "👑 Broadcasting special message to buyers... Please wait.", None)
+            success_count = 0
+            fail_count = 0
+            sent_users = set()
+            for b in DB_STATE.get("buyers", []):
+                u_id = b.get("user_id")
+                if u_id in sent_users or u_id in DB_STATE.get("blocked_users", []): continue
+                sent_users.add(u_id)
+                try:
+                    if message.content_type == 'text':
+                        bot.send_message(u_id, message.text, parse_mode="Markdown")
+                    elif message.content_type == 'photo':
+                        bot.send_photo(u_id, message.photo[-1].file_id, caption=message.caption, parse_mode="Markdown")
+                    elif message.content_type == 'video':
+                        bot.send_video(u_id, message.video.file_id, caption=message.caption, parse_mode="Markdown")
+                    elif message.content_type == 'document':
+                        bot.send_document(u_id, message.document.file_id, caption=message.caption, parse_mode="Markdown")
+                    success_count += 1
+                except Exception as e:
+                    fail_count += 1
+
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
+            update_admin_panel(ADMIN_ID, f"✅ **Buyers Broadcast Completed!**\n\n- Successfully sent: {success_count}\n- Failed: {fail_count}", markup)
+            return
+
         elif state == "WAITING_RESTORE_CODE" and message.text:
             try:
                 restored_data = json.loads(message.text)
@@ -808,5 +1038,6 @@ def run_bot():
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
+    threading.Thread(target=auto_broadcast_worker, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
