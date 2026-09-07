@@ -1,4 +1,4 @@
-import os, json, threading, time, datetime
+import os, json, threading, time, datetime, re
 from flask import Flask
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
@@ -9,6 +9,28 @@ LOG_CHANNEL_ID = int(os.environ.get('LOG_CHANNEL_ID', '0'))
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
+
+# ---------------- TIME PARSER HELPER ----------------
+def parse_duration(time_str):
+    """
+    Parses strings like '1s', '30m', '2h', '1d', '7d' into seconds.
+    If plain integer, treats as seconds.
+    """
+    time_str = str(time_str).strip().lower()
+    match = re.match(r"^(\d+)([smhd])?$", time_str)
+    if not match:
+        return None
+    val, unit = match.groups()
+    val = int(val)
+    if unit == 's' or not unit:
+        return val
+    elif unit == 'm':
+        return val * 60
+    elif unit == 'h':
+        return val * 3600
+    elif unit == 'd':
+        return val * 86400
+    return None
 
 # ---------------- DATA MODEL ----------------
 def new_store():
@@ -22,6 +44,7 @@ def new_store():
         "auto_bc": {"status": False, "interval_seconds": 3600,
                     "message_type": None, "file_id": None, "text": None},
         "broadcast_perm": False,
+        "expiry_time": None  # Epoch timestamp for seller access limit
     }
 
 def fresh_state():
@@ -57,8 +80,13 @@ def store_of_key(key):
     return DB_STATE["hub"] if key in ("hub", None) else DB_STATE["sellers"].get(key, new_store())
 
 def key_of_seller_tg(tg):
+    now = time.time()
     for k, s in DB_STATE["sellers"].items():
-        if s.get("tg_id") == tg: return k
+        if s.get("tg_id") == tg:
+            exp = s.get("expiry_time")
+            if exp and now > exp:
+                return None  # Expired
+            return k
     return None
 
 def now_min():
@@ -131,7 +159,7 @@ def render(uid):
     route = top(uid)
     key = ctx.get("key", "hub")
 
-    # ADMIN PANEL (Custom BC, Auto BC, BC to Buyers - এই ৩টি অপশন সম্পূর্ণ সরিয়ে দেওয়া হয়েছে)
+    # ADMIN PANEL
     if route == "admin" or route == "seller":
         store = store_of_key(key)
         lp = "↔️ Horizontal" if store.get("layout_style") == "horizontal" else "↕️ Vertical"
@@ -152,7 +180,7 @@ def render(uid):
         edit_panel(uid, f"🛠️ **Admin Panel**\n\nStore: `{key}`", kb(*rows))
         return
 
-    # OWNER PANEL (সকল Broadcast সুবিধা শুধুমাত্র Owner এর জন্য রাখা হলো)
+    # OWNER PANEL
     if route == "owner":
         rows = [
             [InlineKeyboardButton("👥 Manage Sellers", callback_data="GO_sellers")],
@@ -162,6 +190,7 @@ def render(uid):
             [InlineKeyboardButton("👑 BC to Buyers", callback_data="SUB_bb")],
             [InlineKeyboardButton("💰 All Sales", callback_data="GO_sales")],
             [InlineKeyboardButton("📣 Send BC to Seller Users", callback_data="GO_ownbc")],
+            [InlineKeyboardButton("⚙️ Single Seller Backup/Restore", callback_data="GO_single_bk")],
             [InlineKeyboardButton("💾 Backup & Restore", callback_data="GO_bk")],
             [InlineKeyboardButton("🛠️ Switch to Admin Panel", callback_data="GO_admin")]
         ]
@@ -169,13 +198,27 @@ def render(uid):
         return
 
     if route == "sellers":
-        s = "👥 **Sellers**\n\n"
+        s = "👥 **Sellers Management**\n\n"
+        now = time.time()
         for k, st in DB_STATE["sellers"].items():
-            s += f"`{k}` | tg:{st.get('tg_id')} | BC:{'✅' if st.get('broadcast_perm') else '❌'}\n"
+            exp = st.get('expiry_time')
+            if exp:
+                rem = int(exp - now)
+                exp_str = f"{max(0, rem)}s remaining" if rem > 0 else "Expired"
+            else:
+                exp_str = "Unlimited"
+            s += f"`{k}` | tg:{st.get('tg_id')} | Time: {exp_str}\n"
         if not DB_STATE["sellers"]: s += "(No seller yet)\n"
         edit_panel(uid, s, kb(
             [InlineKeyboardButton("➕ Add Seller", callback_data="W_addseller")],
-            [InlineKeyboardButton("🔁 Toggle BC Permission", callback_data="W_toggleperm")],
+            [InlineKeyboardButton("⏳ Extend/Set Seller Time", callback_data="W_settime")],
+            [BACK(uid)]))
+        return
+
+    if route == "single_bk":
+        edit_panel(uid, "⚙️ **Single Seller / Specific Setting Backup & Restore**", kb(
+            [InlineKeyboardButton("📤 Export Seller Backup", callback_data="W_expseller")],
+            [InlineKeyboardButton("📥 Import Seller Backup", callback_data="W_impseller")],
             [BACK(uid)]))
         return
 
@@ -258,11 +301,10 @@ def render(uid):
             s = f"🛍️ **Products Management** ({key})\n\n"
             for p in st["products"]:
                 s += f"🆔 `{p['id']}` - **{p['name']}**\n🔗 Link: {p.get('link','None')}\n\n"
-            s += "📌 **Commands:**\n"
-            s += "• Add Product: `ADD_Product Name`\n"
-            s += "• Set Link: `LINK_id_url`\n"
-            s += "• Set Description: `DESC_id_text`\n"
-            s += "• Add Video: `VID_id` (Erpor video pathaben)\n"
+            s += "📌 **Easy Product Add Method:**\n"
+            s += "1. Send or Forward Video to add/update product video.\n"
+            s += "2. Send Text: `Product Name https://link.com` to save name and link.\n\n"
+            s += "📌 **Other Commands:**\n"
             s += "• Delete Product: `DEL_id`"
             edit_panel(uid, s, kb([BACK(uid)]))
             user_states[uid]["wait"] = "prodcmd"
@@ -290,6 +332,7 @@ def cb(c):
     if d == "GO_owner": push(uid, "owner"); render(uid); return
     if d == "GO_admin": push(uid, "admin"); render(uid); return
     if d == "GO_sellers": push(uid, "sellers"); render(uid); return
+    if d == "GO_single_bk": push(uid, "single_bk"); render(uid); return
     if d == "GO_tk": push(uid, "tk"); render(uid); return
     if d == "GO_sales": push(uid, "sales"); render(uid); return
     if d == "GO_ownbc": push(uid, "ownbc"); render(uid); return
@@ -311,12 +354,13 @@ def cb(c):
     if d.startswith("W_"):
         ctx["wait"] = d[2:].lower()
         if ctx["wait"] == "addseller":
-            edit_panel(uid, "Format:\n`s1 123456789 Ramesh`", kb([BACK(uid)]))
-        elif ctx["wait"] == "toggleperm":
-            s = "Toggle BC Permission:\n"
-            for k, st in DB_STATE["sellers"].items():
-                s += f"`perm_{k}` → {k} ({'ON' if st.get('broadcast_perm') else 'OFF'})\n"
-            edit_panel(uid, s or "No sellers.", kb([BACK(uid)]))
+            edit_panel(uid, "Format:\n`s1 123456789 Ramesh 1d` (Time limit: 1s, 30m, 2h, 1d etc.)", kb([BACK(uid)]))
+        elif ctx["wait"] == "settime":
+            edit_panel(uid, "Format:\n`s1 2d` or `s1 3600s` or `s1 +1d` (to increase time)", kb([BACK(uid)]))
+        elif ctx["wait"] == "expseller":
+            edit_panel(uid, "Seller ID type করুন (e.g. `s1`):", kb([BACK(uid)]))
+        elif ctx["wait"] == "impseller":
+            edit_panel(uid, "JSON Text pathan specific seller restore er jonno:", kb([BACK(uid)]))
         elif ctx["wait"] == "tkadd":
             edit_panel(uid, "Format:\n`s1 02:00 06:19`", kb([BACK(uid)]))
         elif ctx["wait"] == "tkmgmt":
@@ -384,7 +428,7 @@ def start_cmd(m):
         key = payload
         st = DB_STATE["sellers"].get(key)
         if not st:
-            bot.send_message(uid, "❌ Store link invalid."); return
+            bot.send_message(uid, "❌ Store link invalid or expired."); return
         ctx["mode"] = "user"; ctx["key"] = key; ctx["nav"] = []
         if takeover_of(key):
             ctx["_src"] = key
@@ -425,7 +469,6 @@ def user_cb(c):
         if not p: return
         if p.get("videos"): send_videos(uid, p["videos"])
         cap = "📌 **" + p["name"] + "**"
-        if p.get("desc"): cap += "\n\n" + p["desc"]
         pay = p.get("pay_msg") or st["payment_msg"]
         mk = kb([InlineKeyboardButton("I have paid ✅", callback_data="PAID_" + pid)],
                 [InlineKeyboardButton("Back 🔙", callback_data="HOME")])
@@ -540,6 +583,101 @@ def inp(m):
             bot.send_message(uid, f"❌ Restore error: {e}")
         return
 
+    if is_owner:
+        if wait == "expseller":
+            sid = txt.strip()
+            if sid in DB_STATE["sellers"]:
+                s_data = json.dumps({sid: DB_STATE["sellers"][sid]}, indent=2)
+                bot.send_document(uid, (f"{sid}_backup.json", s_data.encode()))
+                bot.send_message(uid, f"✅ Backup for `{sid}` sent successfully.")
+            else:
+                bot.send_message(uid, f"❌ Seller `{sid}` not found.")
+            ctx.pop("wait", None); render(uid); return
+
+        if wait == "impseller":
+            try:
+                if m.content_type == "document":
+                    f = bot.get_file(m.document.file_id)
+                    data = json.loads(bot.download_file(f.file_path).decode())
+                else:
+                    data = json.loads(txt)
+                for sid, s_store in data.items():
+                    DB_STATE["sellers"][sid] = s_store
+                save_db()
+                bot.send_message(uid, "✅ Specific seller data restored successfully!")
+            except Exception as e:
+                bot.send_message(uid, f"❌ Single restore error: {e}")
+            ctx.pop("wait", None); render(uid); return
+
+        if wait == "addseller":
+            try:
+                parts = txt.split()
+                sid = parts[0]
+                tg = int(parts[1])
+                nm = parts[2]
+                time_str = parts[3] if len(parts) > 3 else None
+
+                s = new_store(); s["tg_id"] = tg; s["broadcast_perm"] = False
+                if time_str:
+                    sec = parse_duration(time_str)
+                    if sec:
+                        s["expiry_time"] = time.time() + sec
+                DB_STATE["sellers"][sid] = s; save_db()
+                bot.send_message(uid, f"✅ Seller `{sid}` added successfully.")
+            except Exception as e:
+                bot.send_message(uid, "❌ Format: `s1 123456789 Ramesh 1d` (Time limit optional)")
+            ctx.pop("wait", None); render(uid); return
+
+        if wait == "settime":
+            try:
+                parts = txt.split()
+                sid = parts[0]
+                t_val = parts[1]
+                if sid in DB_STATE["sellers"]:
+                    is_add = t_val.startswith("+")
+                    clean_t = t_val.lstrip("+")
+                    sec = parse_duration(clean_t)
+                    if sec:
+                        curr = DB_STATE["sellers"][sid].get("expiry_time")
+                        now = time.time()
+                        if is_add and curr and curr > now:
+                            DB_STATE["sellers"][sid]["expiry_time"] = curr + sec
+                        else:
+                            DB_STATE["sellers"][sid]["expiry_time"] = now + sec
+                        save_db()
+                        bot.send_message(uid, f"✅ Time updated for `{sid}`.")
+                    else:
+                        bot.send_message(uid, "❌ Invalid time format.")
+                else:
+                    bot.send_message(uid, f"❌ Seller `{sid}` not found.")
+            except Exception:
+                bot.send_message(uid, "❌ Format: `s1 2d` or `s1 +1d`")
+            ctx.pop("wait", None); render(uid); return
+
+        if wait == "tkadd":
+            try:
+                sid, frm, to = txt.split()
+                def hm(x): hh, mm = x.split(":"); return int(hh)*60 + int(mm)
+                DB_STATE["takeovers"].append({"seller": sid, "from_min": hm(frm), "to_min": hm(to), "active": True})
+                save_db(); bot.send_message(uid, f"✅ Takeover set for {sid}")
+            except Exception: bot.send_message(uid, "❌ Format: s1 02:00 06:19")
+            ctx.pop("wait", None); render(uid); return
+
+        if wait == "tkmgmt":
+            try:
+                if txt.startswith("tog_"):
+                    DB_STATE["takeovers"][int(txt.split("_")[1])]["active"] ^= True; save_db()
+                elif txt.startswith("deltk_"):
+                    DB_STATE["takeovers"].pop(int(txt.split("_")[1])); save_db()
+                bot.send_message(uid, "✅ Done.")
+            except Exception: bot.send_message(uid, "❌ Format: tog_0 / deltk_0")
+            ctx.pop("wait", None); render(uid); return
+
+        if wait == "ownbc" and txt.startswith("bct_"):
+            sid = txt.split("_", 1)[1]
+            ctx["_bc_key"] = sid; ctx["wait"] = "cb"
+            edit_panel(uid, f"{sid} er users der jonno message pathan:", kb([BACK(uid)])); return
+
     if wait == "startvids" and m.content_type == "video":
         st["start_videos"].append(m.video.file_id); save_db()
         edit_panel(uid, f"✅ Video added! Total: {len(st['start_videos'])}. Add more or `/done`", kb([BACK(uid)]))
@@ -567,135 +705,59 @@ def inp(m):
         except Exception: bot.send_message(uid, "❌ Shohi number pathan.")
         ctx.pop("wait", None); render(uid); return
 
-    if is_owner:
-        if wait == "addseller":
-            try:
-                sid, tg, nm = txt.split(maxsplit=2); tg = int(tg)
-                s = new_store(); s["tg_id"] = tg; s["broadcast_perm"] = False
-                DB_STATE["sellers"][sid] = s; save_db()
-                bot.send_message(uid, f"✅ Seller {sid} added successfully.")
-            except Exception: bot.send_message(uid, "❌ Format: s1 123456789 Ramesh")
-            ctx.pop("wait", None); render(uid); return
-        if wait == "toggleperm" and txt.startswith("perm_"):
-            sid = txt.split("_", 1)[1]
-            if sid in DB_STATE["sellers"]:
-                DB_STATE["sellers"][sid]["broadcast_perm"] = not DB_STATE["sellers"][sid].get("broadcast_perm", False)
-                save_db(); bot.send_message(uid, f"✅ Perm {'ON' if DB_STATE['sellers'][sid]['broadcast_perm'] else 'OFF'}")
-            ctx.pop("wait", None); render(uid); return
-        if wait == "tkadd":
-            try:
-                sid, frm, to = txt.split()
-                def hm(x): hh, mm = x.split(":"); return int(hh)*60 + int(mm)
-                DB_STATE["takeovers"].append({"seller": sid, "from_min": hm(frm), "to_min": hm(to), "active": True})
-                save_db(); bot.send_message(uid, f"✅ Takeover set for {sid}")
-            except Exception: bot.send_message(uid, "❌ Format: s1 02:00 06:19")
-            ctx.pop("wait", None); render(uid); return
-        if wait == "tkmgmt":
-            try:
-                if txt.startswith("tog_"):
-                    DB_STATE["takeovers"][int(txt.split("_")[1])]["active"] ^= True; save_db()
-                elif txt.startswith("deltk_"):
-                    DB_STATE["takeovers"].pop(int(txt.split("_")[1])); save_db()
-                bot.send_message(uid, "✅ Done.")
-            except Exception: bot.send_message(uid, "❌ Format: tog_0 / deltk_0")
-            ctx.pop("wait", None); render(uid); return
-        if wait == "ownbc" and txt.startswith("bct_"):
-            sid = txt.split("_", 1)[1]
-            ctx["_bc_key"] = sid; ctx["wait"] = "cb"
-            edit_panel(uid, f"{sid} er users der jonno message pathan:", kb([BACK(uid)])); return
-
-    # ========= PRODUCT COMMANDS HANDLER =========
-    if wait == "prodcmd":
+    # ========= FORWARD VIDEO & FAST PRODUCT ADD METHOD =========
+    if m.content_type == "video" or wait == "prodcmd":
         st2 = store_of_key(key)
-        
-        # ADD PRODUCT
-        if txt.startswith("ADD_") or txt.startswith("ADD "):
-            nm = txt[4:].strip()
-            if nm:
-                pid = str(len(st2["products"]) + 1)
+
+        # 1. Video Forward or Direct Send to Add Product Video
+        if m.content_type == "video":
+            vid_id = m.video.file_id
+            if not st2["products"]:
+                pid = "1"
                 st2["products"].append({
-                    "id": pid, "name": nm, "desc": "", "videos": [],
-                    "link": "https://example.com", "position": len(st2["products"]) + 1, "pay_msg": ""
+                    "id": pid, "name": "New Product", "videos": [vid_id],
+                    "link": "https://example.com", "position": 1
                 })
+            else:
+                p = st2["products"][-1]
+                p.setdefault("videos", []).append(vid_id)
+                pid = p["id"]
+            save_db()
+            bot.send_message(uid, f"📹 Video saved for Product ID `{pid}`!\nNow send text format: `Product Name https://link.com`", parse_mode="Markdown")
+            return
+
+        # 2. Add Name & Link via Simple Text (e.g., Netflix Premium https://link.com)
+        if "http://" in txt or "https://" in txt:
+            parts = txt.split()
+            link = next((x for x in parts if x.startswith("http://") or x.startswith("https://")), None)
+            if link:
+                name_parts = [x for x in parts if x != link]
+                pname = " ".join(name_parts) if name_parts else "Product"
+                
+                # Check if updating last created product or creating a new one
+                if st2["products"] and st2["products"][-1].get("name") == "New Product":
+                    p = st2["products"][-1]
+                    p["name"] = pname
+                    p["link"] = link
+                else:
+                    pid = str(len(st2["products"]) + 1)
+                    st2["products"].append({
+                        "id": pid, "name": pname, "videos": [],
+                        "link": link, "position": len(st2["products"]) + 1
+                    })
                 save_db()
-                bot.send_message(uid, f"✅ Product **{nm}** Added! (ID: `{pid}`)\n\nSet Link: `LINK_{pid}_https://...`", parse_mode="Markdown")
-            else:
-                bot.send_message(uid, "❌ Product name likhun. Example: `ADD_Netflix`")
-            return
+                bot.send_message(uid, f"✅ Product Saved!\n📌 **Name:** {pname}\n🔗 **Link:** {link}", parse_mode="Markdown")
+                return
 
-        # LINK PRODUCT
-        elif txt.startswith("LINK_") or txt.startswith("LINK "):
-            parts = txt.replace("LINK ", "LINK_").split("_", 2)
-            if len(parts) == 3:
-                pid, url = parts[1].strip(), parts[2].strip()
-                p = next((x for x in st2["products"] if x["id"] == pid), None)
-                if p:
-                    p["link"] = url
-                    save_db()
-                    bot.send_message(uid, f"✅ Product `{pid}` er Link set hoyeche.")
-                else:
-                    bot.send_message(uid, f"❌ Product ID `{pid}` pawa jayni.")
-            else:
-                bot.send_message(uid, "❌ Format: `LINK_id_url`")
-            return
-
-        # DESC PRODUCT
-        elif txt.startswith("DESC_") or txt.startswith("DESC "):
-            parts = txt.replace("DESC ", "DESC_").split("_", 2)
-            if len(parts) == 3:
-                pid, desc = parts[1].strip(), parts[2].strip()
-                p = next((x for x in st2["products"] if x["id"] == pid), None)
-                if p:
-                    p["desc"] = desc
-                    save_db()
-                    bot.send_message(uid, f"✅ Product `{pid}` er Description set hoyeche.")
-                else:
-                    bot.send_message(uid, f"❌ Product ID `{pid}` pawa jayni.")
-            else:
-                bot.send_message(uid, "❌ Format: `DESC_id_text`")
-            return
-
-        # VID PRODUCT
-        elif txt.startswith("VID_") or txt.startswith("VID "):
-            parts = txt.replace("VID ", "VID_").split("_", 1)
-            if len(parts) == 2:
-                pid = parts[1].strip()
-                p = next((x for x in st2["products"] if x["id"] == pid), None)
-                if p:
-                    ctx["wait"] = "prodvid"
-                    ctx["pid"] = pid
-                    bot.send_message(uid, f"📹 Product `{pid}` ({p['name']}) er jonno video file pathan.")
-                else:
-                    bot.send_message(uid, f"❌ Product ID `{pid}` pawa jayni.")
-            else:
-                bot.send_message(uid, "❌ Format: `VID_id`")
-            return
-
-        # DEL PRODUCT
-        elif txt.startswith("DEL_") or txt.startswith("DEL "):
+        # Delete Product Command
+        if txt.startswith("DEL_") or txt.startswith("DEL "):
             parts = txt.replace("DEL ", "DEL_").split("_", 1)
             if len(parts) == 2:
                 pid = parts[1].strip()
                 st2["products"] = [x for x in st2["products"] if x["id"] != pid]
                 save_db()
                 bot.send_message(uid, f"🗑️ Product `{pid}` Delete kora hoyeche.")
-            else:
-                bot.send_message(uid, "❌ Format: `DEL_id`")
             return
-
-    # PRODUCT VIDEO INPUT
-    if wait == "prodvid":
-        pid = ctx.get("pid")
-        if m.content_type == "video":
-            p = next((x for x in store_of_key(key)["products"] if x["id"] == pid), None)
-            if p:
-                p.setdefault("videos", []).append(m.video.file_id)
-                save_db()
-                bot.send_message(uid, f"✅ Product `{pid}` e Video add hoyeche!")
-            ctx.pop("wait", None)
-        else:
-            bot.send_message(uid, "❌ Shohi video file pathan othoba `/cancel` type korun.")
-        return
 
 def store_ab(st, m):
     if m.content_type == "text":
