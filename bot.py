@@ -1035,22 +1035,23 @@ def handle_all_inputs(message):
 def home():
     return "Bot status: Running on Render!"
 
+def run_bot_polling():
+    try:
+        print("==> 🚀 Starting Telegram Bot Polling...")
+        bot.remove_webhook() # Ensure no webhook is blocking polling
+        bot.infinity_polling(timeout=20, long_polling_timeout=10, skip_pending=True)
+    except Exception as e:
+        print(f"==> ❌ BOT CRASHED: {e}")
+
 if __name__ == "__main__":
-    # ১. টেলিগ্রাম বটের পোলিং ব্যাকগ্রাউন্ড থ্রেডে চালু করা
-    bot_thread = threading.Thread(
-        target=lambda: bot.infinity_polling(timeout=20, long_polling_timeout=10, skip_pending=True),
-        daemon=True
-    )
+    # ১. টেলিগ্রাম বটের পোলিং ব্যাকগ্রাউন্ড থ্রেডে চালু করা (লগ সহ)
+    bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
     bot_thread.start()
 
     # ২. অটো ব্রডকাস্ট থ্রেড চালু করা
-    auto_bc_thread = threading.Thread(
-        target=auto_broadcast_worker,
-        daemon=True
-    )
+    auto_bc_thread = threading.Thread(target=auto_broadcast_worker, daemon=True)
     auto_bc_thread.start()
 
-    # ৩. সবশেষে ফ্ল্যাস্ক অ্যাপ মেইন থ্রেডে চালানো (Render পোর্ট বাইন্ডিংয়ের জন্য)
+    # ৩. সবশেষে ফ্ল্যাস্ক অ্যাপ চালানো (Render Port Bind-এর জন্য)
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-
