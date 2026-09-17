@@ -22,6 +22,7 @@ DB_STATE = {
     "how_to_use_video": "",
     "payment_photo": "",
     "payment_msg": "💳 **Payment Instructions**\n\nPlease scan the QR and pay, then click 'I have paid'.",
+    "crypto_pay_msg": "💎 **Premium Crypto Payment**\n\n━━━━━━━━━━━━━━━━━━━━\n\n💰 **Amount:** $7000 (₹700000)\n\n🆔 **Binance Pay ID:**\n`1210553636`\n\n🌕 **BEP20 Wallet Address:**\n`0xeffA3c577872f4755CC817Ab784191d037c9522c`\n\n📸 After completing the payment, send ONLY the payment screenshot in this chat.\n\n⚡ Fast Verification • 🔒 Secure Payment • ✅ Instant Processing\n\n━━━━━━━━━━━━━━━━━━━━",
     "reject_msg": "❌ 𝗣𝗮𝘆𝗺𝗲𝗻𝘁 𝗻𝗼𝘁 𝗿𝗲𝗰𝗶𝘃𝗲. 𝗣𝗹𝗲𝗮𝘀𝗲 𝘁𝗿𝘆 𝗮𝗴𝗮𝗶𝗻...",
     "layout_style": "vertical", 
     "products": [],
@@ -48,6 +49,8 @@ def load_db():
             if "buyers" not in DB_STATE: DB_STATE["buyers"] = []
             if "auto_bc" not in DB_STATE:
                 DB_STATE["auto_bc"] = {"status": False, "interval_seconds": 3600, "message_type": None, "file_id": None, "text": None}
+            if "crypto_pay_msg" not in DB_STATE:
+                DB_STATE["crypto_pay_msg"] = "💎 **Premium Crypto Payment**\n\n━━━━━━━━━━━━━━━━━━━━\n\n💰 **Amount:** $7000 (₹700000)\n\n🆔 **Binance Pay ID:**\n`1210553636`\n\n🌕 **BEP20 Wallet Address:**\n`0xeffA3c577872f4755CC817Ab784191d037c9522c`\n\n📸 After completing the payment, send ONLY the payment screenshot in this chat.\n\n⚡ Fast Verification • 🔒 Secure Payment • ✅ Instant Processing\n\n━━━━━━━━━━━━━━━━━━━━"
     except Exception as e:
         save_db()
 
@@ -254,7 +257,8 @@ def handle_callbacks(call):
                 caption += f"\n\n{desc_text}"
             
             markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("I have paid ✅", callback_data=f"paid_{prod_id}"))
+            markup.row(InlineKeyboardButton("I have paid ✅", callback_data=f"paid_{prod_id}_upi"))
+            markup.row(InlineKeyboardButton("Pay with Crypto 💎", callback_data=f"crypto_{prod_id}"))
             markup.row(InlineKeyboardButton("Back 🔙", callback_data="back_home"))
 
             pay_msg = prod.get("pay_msg") if prod.get("pay_msg") else DB_STATE.get("payment_msg", "💳 **Payment Instructions**\n\nPlease scan the QR and pay, then click 'I have paid'.")
@@ -265,10 +269,25 @@ def handle_callbacks(call):
             else: 
                 bot.send_message(user_id, f"{caption}\n\n{pay_msg}", reply_markup=markup, parse_mode="Markdown")
 
-    elif data.startswith("paid_"):
+    elif data.startswith("crypto_"):
         prod_id = data.split("_")[1]
+        prod = next((p for p in DB_STATE["products"] if p["id"] == prod_id), None)
+        prod_title = f"📌 **Product:** {prod['name']}\n\n" if prod else ""
+        
+        crypto_text = f"{prod_title}" + DB_STATE.get("crypto_pay_msg", "")
+        markup = InlineKeyboardMarkup()
+        markup.row(InlineKeyboardButton("I have paid ✅", callback_data=f"paid_{prod_id}_binance"))
+        markup.row(InlineKeyboardButton("Back 🔙", callback_data="back_home"))
+
+        bot.send_message(user_id, crypto_text, reply_markup=markup, parse_mode="Markdown")
+
+    elif data.startswith("paid_"):
+        parts = data.split("_")
+        prod_id = parts[1]
+        pay_type = parts[2] if len(parts) > 2 else "upi"
+        
         bot.send_message(user_id, "📸 Please send your payment screenshot.")
-        user_states[user_id] = f"WAITING_SCREENSHOT_{prod_id}"
+        user_states[user_id] = f"WAITING_SCREENSHOT_{prod_id}_{pay_type}"
 
     if user_id == ADMIN_ID:
         if data == "adm_start_vids_menu":
@@ -490,6 +509,7 @@ def handle_callbacks(call):
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("💳 Set Global Payment QR/Photo", callback_data="adm_set_pay_photo"))
             markup.row(InlineKeyboardButton("✏️ Edit Global Payment Text", callback_data="adm_edit_pay_msg"))
+            markup.row(InlineKeyboardButton("💎 Edit Crypto Pay Info", callback_data="adm_edit_crypto_msg"))
             markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
             update_admin_panel(ADMIN_ID, "💳 **Global Payment Configuration**", markup)
 
@@ -498,6 +518,12 @@ def handle_callbacks(call):
             markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_pay_config_menu"))
             update_admin_panel(ADMIN_ID, f"✍️ **Current Global Payment Instructions:**\n\n`{DB_STATE.get('payment_msg', '')}`\n\nSend new payment instructions text:", markup)
             user_states[ADMIN_ID] = "ADM_SET_PAY_MSG_TEXT"
+
+        elif data == "adm_edit_crypto_msg":
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 Cancel & Back", callback_data="adm_pay_config_menu"))
+            update_admin_panel(ADMIN_ID, f"✍️ **Current Crypto Payment Text:**\n\n{DB_STATE.get('crypto_pay_msg', '')}\n\nSend new Crypto/Binance payment details text:", markup)
+            user_states[ADMIN_ID] = "ADM_SET_CRYPTO_MSG_TEXT"
 
         elif data == "adm_edit_welcome":
             markup = InlineKeyboardMarkup()
@@ -531,6 +557,7 @@ def handle_callbacks(call):
 
         # --- AUTO BROADCAST ADMIN MENUS ---
         elif data == "adm_autobc_menu":
+            user_states.pop(ADMIN_ID, None)
             bc = DB_STATE.get("auto_bc", {})
             status_str = "🟢 ON" if bc.get("status") else "🔴 OFF"
             interval_sec = bc.get("interval_seconds", 3600)
@@ -547,7 +574,7 @@ def handle_callbacks(call):
             markup.row(InlineKeyboardButton(toggle_text, callback_data="adm_autobc_toggle"))
             markup.row(InlineKeyboardButton("✏️ Set Message & Media", callback_data="adm_autobc_set_msg"))
             markup.row(InlineKeyboardButton("⏱️ Set Preset Time", callback_data="adm_autobc_set_time"))
-            markup.row(InlineKeyboardButton("✍️ Set Custom Timer (Seconds/Minutes)", callback_data="adm_autobc_custom_time"))
+            markup.row(InlineKeyboardButton("✍️ Set Custom Timer (Seconds)", callback_data="adm_autobc_custom_time"))
             markup.row(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="adm_back_panel"))
 
             preview_txt = bc.get("text", "Not Set")
@@ -950,6 +977,12 @@ def handle_all_inputs(message):
             show_main_admin_menu(ADMIN_ID)
             return
 
+        elif state == "ADM_SET_CRYPTO_MSG_TEXT" and message.text:
+            DB_STATE["crypto_pay_msg"] = message.text
+            save_db()
+            show_main_admin_menu(ADMIN_ID)
+            return
+
         elif state == "ADM_ADD_PROD_NAME" and message.text:
             new_id = str(len(DB_STATE["products"]) + 1)
             new_pos = len(DB_STATE["products"]) + 1
@@ -998,7 +1031,10 @@ def handle_all_inputs(message):
         bot.send_message(ADMIN_ID, f"📩 **Report from {user_tag} (`{user_id}`):**\n\n{message.text}\n\n*Tip: Reply directly to this message to answer the user.*", parse_mode="Markdown")
 
     elif state.startswith("WAITING_SCREENSHOT_"):
-        prod_id = state.replace("WAITING_SCREENSHOT_", "")
+        parts = state.split("_")
+        prod_id = parts[2]
+        pay_type = parts[3] if len(parts) > 3 else "upi"
+
         if message.content_type == 'photo':
             user_states.pop(user_id, None)
             bot.send_message(user_id, "⏳𝗖𝗵𝗲𝗰𝗸𝗶𝗻𝗴 𝘆𝗼𝘂𝗿 𝗽𝗮𝘆𝗺𝗲𝗻𝘁....   𝗣𝗹𝗲𝗮𝘀𝗲 𝘄𝗮𝗶𝘁 5-𝟭𝟬 𝗺𝗶𝗻. ")
@@ -1017,12 +1053,14 @@ def handle_all_inputs(message):
             username = message.from_user.username
             user_tag = f"@{username}" if username else "No Username"
             user_name = message.from_user.first_name or "User"
+            
+            method_str = "💛 **Payment Method:** Binance / Crypto" if pay_type == "binance" else "💳 **Payment Method:** UPI / QR Code"
 
             try:
                 bot.send_photo(
                     ADMIN_ID, 
                     photo_id, 
-                    caption=f"📸 **New Payment Screenshot!**\n\n🛍️ **Product:** {prod_name}\n👤 **User:** {user_tag}\n📛 **Name:** {user_name}\n🆔 **ID:** `{user_id}`", 
+                    caption=f"📸 **New Payment Screenshot!**\n\n{method_str}\n🛍️ **Product:** {prod_name}\n👤 **User:** {user_tag}\n📛 **Name:** {user_name}\n🆔 **ID:** `{user_id}`", 
                     reply_markup=adm_markup,
                     parse_mode="Markdown"
                 )
