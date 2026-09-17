@@ -1035,15 +1035,22 @@ def handle_all_inputs(message):
 def home():
     return "Bot status: Running on Render!"
 
-def run_bot():
-    while True:
-        try:
-            bot.infinity_polling(timeout=20, long_polling_timeout=10, skip_pending=True)
-        except Exception:
-            time.sleep(3)
-
 if __name__ == "__main__":
-    threading.Thread(target=run_bot, daemon=True).start()
-    threading.Thread(target=auto_broadcast_worker, daemon=True).start()
+    # ১. টেলিগ্রাম বটের পোলিং ব্যাকগ্রাউন্ড থ্রেডে চালু করা
+    bot_thread = threading.Thread(
+        target=lambda: bot.infinity_polling(timeout=20, long_polling_timeout=10, skip_pending=True),
+        daemon=True
+    )
+    bot_thread.start()
+
+    # ২. অটো ব্রডকাস্ট থ্রেড চালু করা
+    auto_bc_thread = threading.Thread(
+        target=auto_broadcast_worker,
+        daemon=True
+    )
+    auto_bc_thread.start()
+
+    # ৩. সবশেষে ফ্ল্যাস্ক অ্যাপ মেইন থ্রেডে চালানো (Render পোর্ট বাইন্ডিংয়ের জন্য)
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
