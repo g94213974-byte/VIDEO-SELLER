@@ -33,7 +33,8 @@ DB_STATE = {
         "interval_seconds": 3600,
         "message_type": None,
         "file_id": None,
-        "text": None
+        "text": None,
+        "last_run": 0
     }
 }
 
@@ -47,7 +48,7 @@ def load_db():
             DB_STATE.update(loaded_data)
             if "buyers" not in DB_STATE: DB_STATE["buyers"] = []
             if "auto_bc" not in DB_STATE:
-                DB_STATE["auto_bc"] = {"status": False, "interval_seconds": 3600, "message_type": None, "file_id": None, "text": None}
+                DB_STATE["auto_bc"] = {"status": False, "interval_seconds": 3600, "message_type": None, "file_id": None, "text": None, "last_run": 0}
             if "crypto_pay_msg" not in DB_STATE:
                 DB_STATE["crypto_pay_msg"] = "💎 **Premium Crypto Payment**\n\n━━━━━━━━━━━━━━━━━━━━\n\n💰 **Amount:** $7000 (₹700000)\n\n🆔 **Binance Pay ID:**\n`1210553636`\n\n🌕 **BEP20 Wallet Address:**\n`0xeffA3c577872f4755CC817Ab784191d037c9522c`\n\n📸 After completing the payment, send ONLY the payment screenshot in this chat.\n\n⚡ Fast Verification • 🔒 Secure Payment • ✅ Instant Processing\n\n━━━━━━━━━━━━━━━━━━━━"
     except Exception:
@@ -87,40 +88,41 @@ def send_videos_as_album(chat_id, video_list):
                     try: bot.send_video(chat_id, v)
                     except: pass
 
-# --- AUTO BROADCAST BACKGROUND WORKER ---
+# --- NON-BLOCKING AUTO BROADCAST WORKER ---
 def auto_broadcast_worker():
     while True:
         try:
+            time.sleep(5)
             bc_config = DB_STATE.get("auto_bc", {})
-            if bc_config.get("status") and bc_config.get("interval_seconds", 0) > 0:
-                interval = bc_config.get("interval_seconds")
-                time.sleep(interval)
-                
-                if not DB_STATE.get("auto_bc", {}).get("status"):
-                    continue
+            if bc_config.get("status"):
+                interval = bc_config.get("interval_seconds", 3600)
+                last_run = bc_config.get("last_run", 0)
+                now = time.time()
 
-                m_type = bc_config.get("message_type")
-                f_id = bc_config.get("file_id")
-                txt = bc_config.get("text", "")
+                if now - last_run >= interval:
+                    DB_STATE["auto_bc"]["last_run"] = now
+                    save_db()
 
-                for u_id in list(DB_STATE.get("users", [])):
-                    if u_id in DB_STATE.get("blocked_users", []):
-                        continue
-                    try:
-                        if m_type == "text" or not m_type:
-                            bot.send_message(u_id, txt, parse_mode="Markdown")
-                        elif m_type == "photo":
-                            bot.send_photo(u_id, f_id, caption=txt, parse_mode="Markdown")
-                        elif m_type == "video":
-                            bot.send_video(u_id, f_id, caption=txt, parse_mode="Markdown")
-                        elif m_type == "document":
-                            bot.send_document(u_id, f_id, caption=txt, parse_mode="Markdown")
-                    except:
-                        pass
-            else:
-                time.sleep(3)
+                    m_type = bc_config.get("message_type")
+                    f_id = bc_config.get("file_id")
+                    txt = bc_config.get("text", "")
+
+                    for u_id in list(DB_STATE.get("users", [])):
+                        if u_id in DB_STATE.get("blocked_users", []):
+                            continue
+                        try:
+                            if m_type == "text" or not m_type:
+                                bot.send_message(u_id, txt, parse_mode="Markdown")
+                            elif m_type == "photo":
+                                bot.send_photo(u_id, f_id, caption=txt, parse_mode="Markdown")
+                            elif m_type == "video":
+                                bot.send_video(u_id, f_id, caption=txt, parse_mode="Markdown")
+                            elif m_type == "document":
+                                bot.send_document(u_id, f_id, caption=txt, parse_mode="Markdown")
+                        except:
+                            pass
         except Exception:
-            time.sleep(3)
+            pass
 
 @bot.message_handler(commands=['start', 'admin'])
 def start_command(message):
@@ -522,7 +524,7 @@ def handle_callbacks(call):
             update_admin_panel(ADMIN_ID, "🚀 **Send the message (Text, Photo, Video, etc.) for Custom Broadcast:**", markup)
             user_states[ADMIN_ID] = "WAITING_CUSTOM_BROADCAST"
 
-        # --- AUTO BROADCAST ADMIN MENUS ---
+        # --- FIX: AUTO BROADCAST MENU CLICK FIX ---
         elif data == "adm_autobc_menu":
             user_states.pop(ADMIN_ID, None)
             bc = DB_STATE.get("auto_bc", {})
